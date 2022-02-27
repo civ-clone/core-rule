@@ -4,7 +4,8 @@ export interface ICriteria<C extends any[] = any[]> extends ICriterion<C> {
 }
 export declare class Criteria<C extends any[] = any[]>
   extends Criterion<C>
-  implements ICriteria<C> {
+  implements ICriteria<C>
+{
   #private;
   constructor(...criteria: Criterion<C>[]);
   criteria(): Criterion<C>[];

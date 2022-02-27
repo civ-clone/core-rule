@@ -3,7 +3,7 @@ import Criterion from '../Criterion';
 import Effect from '../Effect';
 import Or from '../Criteria/Or';
 import Rule from '../Rule';
-import { expect } from 'chai';
+import { expect, spy } from 'chai';
 
 describe('Rule', () => {
   it('should successfully validate', () => {
@@ -42,5 +42,26 @@ describe('Rule', () => {
     expect(() => {
       new Rule(new Effect(() => {}), new Effect(() => {}));
     }).to.throw(TypeError);
+  });
+
+  it('should fail validation when disabled', () => {
+    const rule = new Rule();
+
+    expect(rule.validate()).to.true;
+
+    rule.disable();
+
+    expect(rule.validate()).to.false;
+  });
+
+  it('should fail not call effects when disabled', () => {
+    const effect = spy(() => {}),
+      rule = new Rule(new Effect(effect));
+
+    rule.disable();
+
+    rule.process();
+
+    expect(effect).to.not.called;
   });
 });

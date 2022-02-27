@@ -10,6 +10,7 @@ export interface IRuleRegistry<
   R = any
 > extends IEntityRegistry<T> {
   get(RuleType: IConstructor<T>): T[];
+  invalidateCache(RuleType: T): void;
   process(RuleType: IConstructor<T>, ...args: P): R[];
 }
 export declare class RuleRegistry<
@@ -18,11 +19,13 @@ export declare class RuleRegistry<
     R = any
   >
   extends EntityRegistry
-  implements IRuleRegistry<T> {
+  implements IRuleRegistry<T>
+{
   #private;
   constructor();
   entries(): T[];
   get(RuleType: IConstructor<T>): T[];
+  invalidateCache(rule: T): void;
   process(RuleType: IConstructor<T>, ...args: P): R[];
   register(...rules: T[]): void;
   unregister(...rules: T[]): void;

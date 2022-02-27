@@ -6,6 +6,9 @@ import { Normal } from './Priorities';
 import Priority from './Priority';
 
 export interface IRule<C extends any[] = any[], R = any> {
+  disable(): void;
+  enable(): void;
+  enabled(): boolean;
   priority(): Priority;
   process(...args: C): R | void;
   validate(...args: C): boolean;
@@ -13,6 +16,7 @@ export interface IRule<C extends any[] = any[], R = any> {
 
 export class Rule<C extends any[] = any[], R = any> implements IRule<C, R> {
   #criteria: Criteria<C> | undefined;
+  #enabled: boolean = true;
   #effect: Effect<C, R> | undefined;
   #priority: Priority = new Normal();
 
@@ -46,17 +50,37 @@ export class Rule<C extends any[] = any[], R = any> implements IRule<C, R> {
     }
   }
 
+  disable(): void {
+    this.#enabled = false;
+  }
+
+  enable(): void {
+    this.#enabled = true;
+  }
+
+  enabled(): boolean {
+    return this.#enabled;
+  }
+
   priority(): Priority {
     return this.#priority;
   }
 
   process(...args: C): R | void {
+    if (!this.#enabled) {
+      return;
+    }
+
     if (this.#effect instanceof Effect) {
       return this.#effect.apply(...args);
     }
   }
 
   validate(...args: C): boolean {
+    if (!this.#enabled) {
+      return false;
+    }
+
     if (this.#criteria instanceof Criterion) {
       return this.#criteria.validate(...args);
     }

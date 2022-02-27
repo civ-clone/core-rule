@@ -11,6 +11,7 @@ export interface IRuleRegistry<
   R = any
 > extends IEntityRegistry<T> {
   get(RuleType: IConstructor<T>): T[];
+  invalidateCache(RuleType: T): void;
   process(RuleType: IConstructor<T>, ...args: P): R[];
 }
 
@@ -20,12 +21,9 @@ export class RuleRegistry<
     R = any
   >
   extends EntityRegistry
-  implements IRuleRegistry<T> {
+  implements IRuleRegistry<T>
+{
   #cache: Map<IConstructor<T>, T[]> = new Map();
-
-  #invalidateCache = (rule: T): void => {
-    this.#cache.delete(<IConstructor<T>>rule.constructor);
-  };
 
   constructor() {
     super(Rule);
@@ -43,11 +41,17 @@ export class RuleRegistry<
     if (!this.#cache.has(RuleType)) {
       this.#cache.set(
         RuleType,
-        this.filter((rule: T): boolean => rule instanceof RuleType)
+        this.filter((rule: T): boolean => rule.enabled()).filter(
+          (rule: T): boolean => rule instanceof RuleType
+        )
       );
     }
 
     return this.#cache.get(RuleType) || [];
+  }
+
+  invalidateCache(rule: T): void {
+    this.#cache.delete(<IConstructor<T>>rule.constructor);
   }
 
   process(RuleType: IConstructor<T>, ...args: P): R[] {
@@ -59,13 +63,13 @@ export class RuleRegistry<
   register(...rules: T[]) {
     super.register(...rules);
 
-    rules.forEach((rule: T): void => this.#invalidateCache(rule));
+    rules.forEach((rule: T): void => this.invalidateCache(rule));
   }
 
   unregister(...rules: T[]): void {
     super.unregister(...rules);
 
-    rules.forEach((rule: T): void => this.#invalidateCache(rule));
+    rules.forEach((rule: T): void => this.invalidateCache(rule));
   }
 }
 

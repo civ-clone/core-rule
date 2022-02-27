@@ -52,9 +52,7 @@ describe('RuleRegistry', () => {
     const rules = ruleRegistry.get(Rule);
 
     expect(rules.map((rule: Rule): number => rule.priority().value())).to.eql([
-      1000,
-      2000,
-      3000,
+      1000, 2000, 3000,
     ]);
   });
 
@@ -71,5 +69,23 @@ describe('RuleRegistry', () => {
 
     expect(ruleRegistry.process(Rule)).to.eql([void 0, void 0, void 0]);
     expect(spy).to.called.exactly(3);
+  });
+
+  it('should not return disabled `Rule`s', () => {
+    const ruleRegistry = new RuleRegistry(),
+      rule1 = new Rule(),
+      rule2 = new Rule();
+
+    ruleRegistry.register(rule1, rule2);
+
+    expect(ruleRegistry.get(Rule)).all.members([rule1, rule2]);
+
+    rule1.disable();
+
+    ruleRegistry.invalidateCache(rule1);
+
+    expect(rule1.enabled()).to.false;
+
+    expect(ruleRegistry.get(Rule)).all.members([rule2]).not.members([rule1]);
   });
 });
