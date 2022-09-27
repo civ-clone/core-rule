@@ -19,17 +19,19 @@ class RuleRegistry extends EntityRegistry_1.EntityRegistry {
             .entries()
             .sort((a, b) => a.priority().value() - b.priority().value());
     }
-    get(RuleType) {
-        if (!__classPrivateFieldGet(this, _RuleRegistry_cache, "f").has(RuleType)) {
-            __classPrivateFieldGet(this, _RuleRegistry_cache, "f").set(RuleType, this.filter((rule) => rule.enabled()).filter((rule) => rule instanceof RuleType));
+    get(ruleType) {
+        if (!__classPrivateFieldGet(this, _RuleRegistry_cache, "f").has(ruleType)) {
+            __classPrivateFieldGet(this, _RuleRegistry_cache, "f").set(ruleType, this.filter((rule) => rule.enabled() && rule instanceof ruleType));
         }
-        return __classPrivateFieldGet(this, _RuleRegistry_cache, "f").get(RuleType) || [];
+        return __classPrivateFieldGet(this, _RuleRegistry_cache, "f").get(ruleType) || [];
     }
     invalidateCache(rule) {
-        __classPrivateFieldGet(this, _RuleRegistry_cache, "f").delete(rule.constructor);
+        __classPrivateFieldGet(this, _RuleRegistry_cache, "f").delete(rule instanceof Rule_1.default
+            ? rule.constructor
+            : rule);
     }
-    process(RuleType, ...args) {
-        return this.get(RuleType)
+    process(ruleType, ...args) {
+        return this.get(ruleType)
             .filter((rule) => rule.validate(...args))
             .map((rule) => rule.process(...args));
     }

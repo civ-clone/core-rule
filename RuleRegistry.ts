@@ -5,71 +5,83 @@ import {
 import { IConstructor } from '@civ-clone/core-registry/Registry';
 import Rule from './Rule';
 
+type RuleArgs<T extends Rule> = T extends Rule<infer C, any> ? C : never;
+type RuleReturn<T extends Rule> = T extends Rule<any[], infer R> ? R : never;
+
 export interface IRuleRegistry<
   T extends Rule = Rule,
   P extends any[] = any[],
   R = any
 > extends IEntityRegistry<T> {
-  get(RuleType: IConstructor<T>): T[];
-  invalidateCache(RuleType: T): void;
-  process(RuleType: IConstructor<T>, ...args: P): R[];
+  get<RuleType extends T = T>(ruleType: IConstructor<RuleType>): RuleType[];
+  invalidateCache(rule: T | IConstructor<T>): void;
+  process<RuleType extends T = T>(
+    ruleType: IConstructor<RuleType>,
+    ...args: RuleArgs<RuleType>
+  ): RuleReturn<RuleType>[];
 }
 
-export class RuleRegistry<
-    T extends Rule = Rule,
-    P extends any[] = any[],
-    R = any
-  >
-  extends EntityRegistry
-  implements IRuleRegistry<T>
+export class RuleRegistry
+  extends EntityRegistry<Rule>
+  implements IRuleRegistry
 {
-  #cache: Map<IConstructor<T>, T[]> = new Map();
+  #cache: Map<IConstructor<Rule>, Rule[]> = new Map();
 
   constructor() {
     super(Rule);
   }
 
-  entries(): T[] {
+  entries(): Rule[] {
     return super
       .entries()
       .sort(
-        (a: T, b: T): number => a.priority().value() - b.priority().value()
+        (a: Rule, b: Rule): number =>
+          a.priority().value() - b.priority().value()
       );
   }
 
-  get(RuleType: IConstructor<T>): T[] {
-    if (!this.#cache.has(RuleType)) {
+  get<RuleType extends Rule = Rule>(
+    ruleType: IConstructor<RuleType>
+  ): RuleType[] {
+    if (!this.#cache.has(ruleType)) {
       this.#cache.set(
-        RuleType,
-        this.filter((rule: T): boolean => rule.enabled()).filter(
-          (rule: T): boolean => rule instanceof RuleType
+        ruleType,
+        this.filter(
+          (rule: Rule): boolean => rule.enabled() && rule instanceof ruleType
         )
       );
     }
 
-    return this.#cache.get(RuleType) || [];
+    return (this.#cache.get(ruleType) as RuleType[]) || [];
   }
 
-  invalidateCache(rule: T): void {
-    this.#cache.delete(<IConstructor<T>>rule.constructor);
+  invalidateCache(rule: Rule | IConstructor<Rule>): void {
+    this.#cache.delete(
+      rule instanceof Rule
+        ? (rule.constructor as IConstructor<Rule>)
+        : (rule as IConstructor<Rule>)
+    );
   }
 
-  process(RuleType: IConstructor<T>, ...args: P): R[] {
-    return this.get(RuleType)
-      .filter((rule: T): boolean => rule.validate(...args))
-      .map((rule: T): R => rule.process(...args));
+  process<RuleType extends Rule = Rule>(
+    ruleType: IConstructor<RuleType>,
+    ...args: RuleArgs<RuleType>
+  ): RuleReturn<RuleType>[] {
+    return this.get(ruleType)
+      .filter((rule: RuleType): boolean => rule.validate(...args))
+      .map((rule: RuleType): RuleReturn<RuleType> => rule.process(...args));
   }
 
-  register(...rules: T[]) {
+  register(...rules: Rule[]) {
     super.register(...rules);
 
-    rules.forEach((rule: T): void => this.invalidateCache(rule));
+    rules.forEach((rule: Rule): void => this.invalidateCache(rule));
   }
 
-  unregister(...rules: T[]): void {
+  unregister(...rules: Rule[]): void {
     super.unregister(...rules);
 
-    rules.forEach((rule: T): void => this.invalidateCache(rule));
+    rules.forEach((rule: Rule): void => this.invalidateCache(rule));
   }
 }
 
