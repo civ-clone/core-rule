@@ -21,11 +21,16 @@ export interface IRuleRegistry<
   ): RuleReturn<RuleType>[];
 }
 
+interface RuleCacheMap extends Map<IConstructor<Rule>, Rule[]> {
+  get<T extends Rule>(ruleType: IConstructor<T>): T[];
+  set<T extends Rule>(ruleType: IConstructor<T>, rules: T[]): this;
+}
+
 export class RuleRegistry
   extends EntityRegistry<Rule>
   implements IRuleRegistry
 {
-  #cache: Map<IConstructor<Rule>, Rule[]> = new Map();
+  #cache: RuleCacheMap = new Map();
 
   constructor() {
     super(Rule);
@@ -40,19 +45,18 @@ export class RuleRegistry
       );
   }
 
-  get<RuleType extends Rule = Rule>(
-    ruleType: IConstructor<RuleType>
-  ): RuleType[] {
+  get<RuleType extends Rule>(ruleType: IConstructor<RuleType>): RuleType[] {
     if (!this.#cache.has(ruleType)) {
       this.#cache.set(
         ruleType,
         this.filter(
-          (rule: Rule): boolean => rule.enabled() && rule instanceof ruleType
+          (rule: Rule): rule is RuleType =>
+            rule.enabled() && rule instanceof ruleType
         )
       );
     }
 
-    return (this.#cache.get(ruleType) as RuleType[]) || [];
+    return this.#cache.get(ruleType) || [];
   }
 
   invalidateCache(rule: Rule | IConstructor<Rule>): void {
@@ -63,7 +67,7 @@ export class RuleRegistry
     );
   }
 
-  process<RuleType extends Rule = Rule>(
+  process<RuleType extends Rule>(
     ruleType: IConstructor<RuleType>,
     ...args: RuleArgs<RuleType>
   ): RuleReturn<RuleType>[] {

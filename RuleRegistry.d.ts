@@ -29,11 +29,9 @@ export declare class RuleRegistry
   #private;
   constructor();
   entries(): Rule[];
-  get<RuleType extends Rule = Rule>(
-    ruleType: IConstructor<RuleType>
-  ): RuleType[];
+  get<RuleType extends Rule>(ruleType: IConstructor<RuleType>): RuleType[];
   invalidateCache(rule: Rule | IConstructor<Rule>): void;
-  process<RuleType extends Rule = Rule>(
+  process<RuleType extends Rule>(
     ruleType: IConstructor<RuleType>,
     ...args: RuleArgs<RuleType>
   ): RuleReturn<RuleType>[];
