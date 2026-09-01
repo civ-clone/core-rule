@@ -15,23 +15,23 @@ export interface IRule<C extends any[] = any[], R = any> {
 }
 
 export class Rule<C extends any[] = any[], R = any> implements IRule<C, R> {
-  #criteria: Criteria<C> | undefined;
-  #enabled: boolean = true;
-  #effect: Effect<C, R> | undefined;
-  #priority: Priority = new Normal();
+  private _criteria: Criteria<C> | undefined;
+  private _enabled: boolean = true;
+  private _effect: Effect<C, R> | undefined;
+  private _priority: Priority = new Normal();
 
   constructor(...values: (Priority | Criterion<C> | Effect<C, R>)[]) {
     const criteria: Criterion<C>[] = [];
 
     values.forEach((value: Priority | Criterion<C> | Effect<C, R>): void => {
       if (value instanceof Effect) {
-        if (this.#effect) {
+        if (this._effect) {
           throw new TypeError(
             'Rule: effect already specified, but another was provided.'
           );
         }
 
-        this.#effect = value;
+        this._effect = value;
 
         return;
       }
@@ -42,47 +42,47 @@ export class Rule<C extends any[] = any[], R = any> implements IRule<C, R> {
         return;
       }
 
-      this.#priority = value;
+      this._priority = value;
     });
 
     if (criteria.length) {
-      this.#criteria = new And(...criteria);
+      this._criteria = new And(...criteria);
     }
   }
 
   disable(): void {
-    this.#enabled = false;
+    this._enabled = false;
   }
 
   enable(): void {
-    this.#enabled = true;
+    this._enabled = true;
   }
 
   enabled(): boolean {
-    return this.#enabled;
+    return this._enabled;
   }
 
   priority(): Priority {
-    return this.#priority;
+    return this._priority;
   }
 
   process(...args: C): R | void {
-    if (!this.#enabled) {
+    if (!this._enabled) {
       return;
     }
 
-    if (this.#effect instanceof Effect) {
-      return this.#effect.apply(...args);
+    if (this._effect instanceof Effect) {
+      return this._effect.apply(...args);
     }
   }
 
   validate(...args: C): boolean {
-    if (!this.#enabled) {
+    if (!this._enabled) {
       return false;
     }
 
-    if (this.#criteria instanceof Criterion) {
-      return this.#criteria.validate(...args);
+    if (this._criteria instanceof Criterion) {
+      return this._criteria.validate(...args);
     }
 
     return true;

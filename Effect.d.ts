@@ -4,7 +4,7 @@ export interface IEffect {
 export declare class Effect<T extends any[] = any[], R = any>
   implements IEffect
 {
-  #private;
+  private _effect;
   constructor(effect: (...args: T) => R);
   apply(...args: T): R;
 }

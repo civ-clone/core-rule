@@ -6,7 +6,7 @@ export interface IRuleset {
   remove(...rules: Rule[]): void;
 }
 export declare class Ruleset implements IRuleset {
-  #private;
+  private _rules;
   constructor(...rules: Rule[]);
   add(...rules: Rule[]): void;
   enable(): void;

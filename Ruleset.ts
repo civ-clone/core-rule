@@ -8,30 +8,30 @@ export interface IRuleset {
 }
 
 export class Ruleset implements IRuleset {
-  #rules: Rule[] = [];
+  private _rules: Rule[] = [];
 
   constructor(...rules: Rule[]) {
-    this.#rules.push(...rules);
+    this._rules.push(...rules);
   }
 
   add(...rules: Rule[]): void {
-    this.#rules.push(...rules);
+    this._rules.push(...rules);
   }
 
   enable(): void {
-    this.#rules.forEach((rule) => rule.enable());
+    this._rules.forEach((rule) => rule.enable());
   }
 
   disable(): void {
-    this.#rules.forEach((rule) => rule.disable());
+    this._rules.forEach((rule) => rule.disable());
   }
 
   remove(...rules: Rule[]): void {
     rules.forEach((rule) => {
-      const index = this.#rules.indexOf(rule);
+      const index = this._rules.indexOf(rule);
 
       if (index !== -1) {
-        this.#rules.splice(index, 1);
+        this._rules.splice(index, 1);
       }
     });
   }

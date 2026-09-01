@@ -3,14 +3,14 @@ export interface IPriority {
 }
 
 export class Priority implements IPriority {
-  #value: number;
+  private _value: number;
 
   constructor(value: number = 2000) {
-    this.#value = value;
+    this._value = value;
   }
 
   value(): number {
-    return this.#value;
+    return this._value;
   }
 }
 

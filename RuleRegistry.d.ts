@@ -26,7 +26,7 @@ export declare class RuleRegistry
   extends EntityRegistry<Rule>
   implements IRuleRegistry
 {
-  #private;
+  private _cache;
   constructor();
   entries(): Rule[];
   get<RuleType extends Rule>(ruleType: IConstructor<RuleType>): RuleType[];

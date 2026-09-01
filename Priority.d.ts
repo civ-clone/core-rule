@@ -2,7 +2,7 @@ export interface IPriority {
   value(): number;
 }
 export declare class Priority implements IPriority {
-  #private;
+  private _value;
   constructor(value?: number);
   value(): number;
 }

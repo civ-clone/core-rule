@@ -4,7 +4,7 @@ export interface ICriterion<C extends any[] = any[]> {
 export declare class Criterion<C extends any[] = any[]>
   implements ICriterion<C>
 {
-  #private;
+  private _criterion;
   constructor(criterion?: (...args: C) => boolean);
   validate(...args: C): boolean;
 }

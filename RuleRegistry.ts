@@ -30,7 +30,7 @@ export class RuleRegistry
   extends EntityRegistry<Rule>
   implements IRuleRegistry
 {
-  #cache: RuleCacheMap = new Map();
+  private _cache: RuleCacheMap = new Map();
 
   constructor() {
     super(Rule);
@@ -46,8 +46,8 @@ export class RuleRegistry
   }
 
   get<RuleType extends Rule>(ruleType: IConstructor<RuleType>): RuleType[] {
-    if (!this.#cache.has(ruleType)) {
-      this.#cache.set(
+    if (!this._cache.has(ruleType)) {
+      this._cache.set(
         ruleType,
         this.filter(
           (rule: Rule): rule is RuleType =>
@@ -56,11 +56,11 @@ export class RuleRegistry
       );
     }
 
-    return this.#cache.get(ruleType) || [];
+    return this._cache.get(ruleType) || [];
   }
 
   invalidateCache(rule: Rule | IConstructor<Rule>): void {
-    this.#cache.delete(
+    this._cache.delete(
       rule instanceof Rule
         ? (rule.constructor as IConstructor<Rule>)
         : (rule as IConstructor<Rule>)

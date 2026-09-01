@@ -6,7 +6,7 @@ export declare class Criteria<C extends any[] = any[]>
   extends Criterion<C>
   implements ICriteria<C>
 {
-  #private;
+  private _criteria;
   constructor(...criteria: Criterion<C>[]);
   criteria(): Criterion<C>[];
   validate(...args: C): boolean;

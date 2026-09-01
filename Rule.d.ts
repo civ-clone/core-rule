@@ -12,7 +12,10 @@ export interface IRule<C extends any[] = any[], R = any> {
 export declare class Rule<C extends any[] = any[], R = any>
   implements IRule<C, R>
 {
-  #private;
+  private _criteria;
+  private _enabled;
+  private _effect;
+  private _priority;
   constructor(...values: (Priority | Criterion<C> | Effect<C, R>)[]);
   disable(): void;
   enable(): void;

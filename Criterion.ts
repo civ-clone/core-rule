@@ -3,20 +3,20 @@ export interface ICriterion<C extends any[] = any[]> {
 }
 
 export class Criterion<C extends any[] = any[]> implements ICriterion<C> {
-  #criterion: ((...args: C) => boolean) | null = null;
+  private _criterion: ((...args: C) => boolean) | null = null;
 
   constructor(criterion?: (...args: C) => boolean) {
     if (criterion) {
-      this.#criterion = criterion;
+      this._criterion = criterion;
     }
   }
 
   validate(...args: C): boolean {
-    if (this.#criterion === null) {
+    if (this._criterion === null) {
       return true;
     }
 
-    return this.#criterion(...args);
+    return this._criterion(...args);
   }
 }
 
