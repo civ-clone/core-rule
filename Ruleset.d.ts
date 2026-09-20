@@ -1,16 +1,16 @@
 import Rule from './Rule';
 export interface IRuleset {
-  add(...rules: Rule[]): void;
-  enable(): void;
-  disable(): void;
-  remove(...rules: Rule[]): void;
+    add(...rules: Rule[]): void;
+    enable(): void;
+    disable(): void;
+    remove(...rules: Rule[]): void;
 }
 export declare class Ruleset implements IRuleset {
-  private _rules;
-  constructor(...rules: Rule[]);
-  add(...rules: Rule[]): void;
-  enable(): void;
-  disable(): void;
-  remove(...rules: Rule[]): void;
+    private _rules;
+    constructor(...rules: Rule[]);
+    add(...rules: Rule[]): void;
+    enable(): void;
+    disable(): void;
+    remove(...rules: Rule[]): void;
 }
 export default Ruleset;

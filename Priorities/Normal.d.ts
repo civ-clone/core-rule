@@ -1,5 +1,5 @@
 import Priority from '../Priority';
 export declare class Normal extends Priority {
-  constructor();
+    constructor();
 }
 export default Normal;

@@ -203,13 +203,40 @@ export class RuleRegistry
     );
   }
 
+  /**
+   * Plain loops rather than `filter().map()`.
+   *
+   * This is the hottest loop in the engine: a 30-turn headless game makes
+   * 143,148 `process(MovementCost, …)` calls, each walking 148 rules, and
+   * 98.5% of every rule validation in a run happens right here. `filter` and
+   * `map` each allocate a closure per call on top of their arrays, for no
+   * reason other than how the line reads.
+   *
+   * Every rule is still validated *before* any rule is processed, which is
+   * what `filter().map()` did and is not an incidental detail: a rule's effect
+   * can change what a later rule's criteria look at, so interleaving the two
+   * passes would be a behavioural change and not an optimisation.
+   */
   process<RuleType extends Rule>(
     ruleType: IConstructor<RuleType>,
     ...args: RuleArgs<RuleType>
   ): RuleReturn<RuleType>[] {
-    return this.get(ruleType)
-      .filter((rule: RuleType): boolean => rule.validate(...args))
-      .map((rule: RuleType): RuleReturn<RuleType> => rule.process(...args));
+    const rules = this.get(ruleType),
+      matched: RuleType[] = [];
+
+    for (let index = 0; index < rules.length; index++) {
+      if (rules[index].validate(...args)) {
+        matched.push(rules[index]);
+      }
+    }
+
+    const results: RuleReturn<RuleType>[] = new Array(matched.length);
+
+    for (let index = 0; index < matched.length; index++) {
+      results[index] = matched[index].process(...args);
+    }
+
+    return results;
   }
 
   register(...rules: Rule[]) {

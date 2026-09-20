@@ -22,10 +22,21 @@ export class Criteria<C extends any[] = any[]>
     return this._criteria;
   }
 
+  /**
+   * `every` with a plain loop, for the same reason as `RuleRegistry.process`:
+   * this runs once per rule per dispatch, twenty-one million times in a
+   * thirty-turn game, and the closure it allocated was doing nothing the loop
+   * does not. Short-circuiting on the first false is `every`'s behaviour and
+   * is kept — most of those twenty-one million exit on criterion one.
+   */
   validate(...args: C): boolean {
-    return this._criteria.every((criterion: Criterion<C>): boolean =>
-      criterion.validate(...args)
-    );
+    for (let index = 0; index < this._criteria.length; index++) {
+      if (!this._criteria[index].validate(...args)) {
+        return false;
+      }
+    }
+
+    return true;
   }
 }
 
