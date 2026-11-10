@@ -129,8 +129,21 @@ class RuleSet {
             this._listeners = this._listeners.filter((other) => other !== listener);
         };
     }
+    // Every listener hears, whatever another does with the news: the change has been made by now, and a set may be in
+    //  more than one game's registry. The first error is thrown once all have been told.
     changed() {
-        [...this._listeners].forEach((listener) => listener());
+        const errors = [];
+        [...this._listeners].forEach((listener) => {
+            try {
+                listener();
+            }
+            catch (error) {
+                errors.push(error);
+            }
+        });
+        if (errors.length > 0) {
+            throw errors[0];
+        }
     }
 }
 exports.RuleSet = RuleSet;

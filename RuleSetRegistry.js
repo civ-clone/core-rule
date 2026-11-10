@@ -61,8 +61,11 @@ class RuleSetRegistry {
         this._pending = new Map();
         this._sets = new Map();
         this._subscriptions = new Map();
-        /** The rules this has switched off: the only ones it will switch back on. */
-        this._switchedOff = new Set();
+        /** The rules this has switched off, each by id: the only ones it will switch back on. */
+        this._switchedOff = new Map();
+        /** When each setting in `_values` was made, to tell an older one from a newer. */
+        this._setAt = new Map();
+        this._settings = 0;
         this._values = new Map();
         this._rules = rules;
         this._stopListening = rules.onRegister((rule) => {
@@ -91,6 +94,7 @@ class RuleSetRegistry {
         this._sets.clear();
         this._pending.clear();
         this._values.clear();
+        this._setAt.clear();
         this._chosen.clear();
         this._defaultOff = null;
         this._apply();
@@ -118,7 +122,7 @@ class RuleSetRegistry {
      */
     register(...sets) {
         const incoming = new Map(), look = (set) => {
-            var _a;
+            var _a, _b;
             const known = (_a = incoming.get(set.id())) !== null && _a !== void 0 ? _a : this._sets.get(set.id());
             if (known === set) {
                 return;
@@ -127,7 +131,8 @@ class RuleSetRegistry {
                 throw this._duplicate(set.id());
             }
             incoming.set(set.id(), set);
-            set.members().forEach((member) => {
+            // Its own members, and those waiting for it from `extend`, which it is given as it is taken in.
+            [...set.members(), ...((_b = this._pending.get(set.id())) !== null && _b !== void 0 ? _b : [])].forEach((member) => {
                 if (member instanceof RuleSet_1.RuleSet) {
                     look(member);
                 }
@@ -316,6 +321,7 @@ class RuleSetRegistry {
     restore(choices) {
         const unknown = [];
         this._values.clear();
+        this._setAt.clear();
         this._chosen.clear();
         try {
             choices.forEach((choice) => {
@@ -345,6 +351,7 @@ class RuleSetRegistry {
     /** Everything back as the sets declare it. */
     reset() {
         this._values.clear();
+        this._setAt.clear();
         this._chosen.clear();
         this._apply();
     }
@@ -433,6 +440,7 @@ class RuleSetRegistry {
             '`extend`.');
     }
     _adopt(set) {
+        var _a;
         const existing = this._sets.get(set.id());
         if (existing === set) {
             return;
@@ -464,23 +472,39 @@ class RuleSetRegistry {
         }
         this._adoptMembers(set);
         // Switched before it arrived, through a set that named it by id: until now the id was taken for a rule's, and
-        //  the setting was kept against it. It passes to the rules the set switches, except any switched themselves since.
-        const held = this._values.get(set.id());
+        //  the setting was kept against it. It passes to the rules the set switches, except any switched themselves since
+        //  (and not before: an older setting of a rule gives way, as it would have had the set been there).
+        const held = this._values.get(set.id()), heldAt = (_a = this._setAt.get(set.id())) !== null && _a !== void 0 ? _a : 0;
         if (held !== undefined) {
             this._values.delete(set.id());
+            this._setAt.delete(set.id());
             this._leaves(set.id()).forEach((leaf) => {
-                if (!this._values.has(leaf)) {
+                var _a;
+                if (((_a = this._setAt.get(leaf)) !== null && _a !== void 0 ? _a : -1) < heldAt) {
                     this._values.set(leaf, held);
+                    this._setAt.set(leaf, heldAt);
                 }
             });
         }
     }
+    // Each of them tried, whatever becomes of another: one that can't be taken in (its id is taken) must not leave the
+    //  ones after it out, with their rules unswitched. The first refusal is thrown once all have been tried.
     _adoptMembers(set) {
+        const errors = [];
         set.members().forEach((member) => {
-            if (member instanceof RuleSet_1.RuleSet) {
+            if (!(member instanceof RuleSet_1.RuleSet)) {
+                return;
+            }
+            try {
                 this._adopt(member);
             }
+            catch (error) {
+                errors.push(error);
+            }
         });
+        if (errors.length > 0) {
+            throw errors[0];
+        }
     }
     _requireSet(id) {
         const set = this._sets.get(id);
@@ -501,9 +525,13 @@ class RuleSetRegistry {
     }
     _set(id, on) {
         const set = this._sets.get(id);
+        const at = ++this._settings, write = (rule) => {
+            this._values.set(rule, on);
+            this._setAt.set(rule, at);
+        };
         if (!set) {
             this._requireMember(id);
-            this._values.set(id, on);
+            write(id);
             return;
         }
         if (set.exclusive()) {
@@ -514,7 +542,7 @@ class RuleSetRegistry {
             throw new RuleSet_1.RuleSetError(`RuleSet '${id}' has nothing to switch: it reaches no rule except ` +
                 'through a choice, and a choice is chosen from.');
         }
-        leaves.forEach((leaf) => this._values.set(leaf, on));
+        leaves.forEach(write);
     }
     _choose(id, member) {
         const set = this._requireSet(id);
@@ -622,13 +650,15 @@ class RuleSetRegistry {
         this._effective = this._evaluate();
         this._effective.forEach((on, id) => this._switch(id, on));
         // A rule this switched off, and that no set holds any more, goes back on: nothing else would ever do it.
-        [...this._switchedOff]
+        [...this._switchedOff.keys()]
             .filter((id) => !this._effective.has(id))
             .forEach((id) => this._switch(id, true));
     }
     /**
      * Off: switched off if it is on, and remembered as this registry's doing.
-     * On: switched back on only if it is remembered. See the class comment.
+     * On: switched back on only if it is the very rule remembered: one that has
+     * since been replaced under the same id was never this registry's to switch
+     * on. See the class comment.
      */
     _switch(id, on) {
         const rule = this._rules.getById(id);
@@ -637,14 +667,21 @@ class RuleSetRegistry {
             return;
         }
         if (on) {
-            if (this._switchedOff.delete(id)) {
+            const mine = this._switchedOff.get(id);
+            this._switchedOff.delete(id);
+            if (mine === rule) {
                 this._rules.enableById(id);
             }
             return;
         }
         if (rule.enabled()) {
-            this._switchedOff.add(id);
+            this._switchedOff.set(id, rule);
             this._rules.disableById(id);
+            return;
+        }
+        // Already off. If that was this registry's doing, it still is; if another rule was, that one is gone.
+        if (this._switchedOff.get(id) !== rule) {
+            this._switchedOff.delete(id);
         }
     }
 }

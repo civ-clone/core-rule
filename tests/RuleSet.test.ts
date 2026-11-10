@@ -800,6 +800,48 @@ describe('RuleSetRegistry and what it leaves alone', (): void => {
     expect((): void => sets.check()).not.to.throw();
   });
 
+  it('should not switch on a replacement that arrived switched off', (): void => {
+    const { rules, sets, ran } = setUp(),
+      replacement = named('a');
+
+    sets.register(new RuleSet('set', 'a'));
+    sets.set('set', false);
+
+    replacement.disable();
+    rules.replace('a', replacement);
+    sets.set('set', true);
+
+    expect(replacement.enabled()).to.be.false;
+    expect(ran()).to.eql(['b', 'c', 'd', 'e', 'f']);
+  });
+
+  it('should give way to a newer setting, and not an older, when a set switched early arrives', (): void => {
+    const older = setUp(),
+      newer = setUp();
+
+    // `b` switched off, then `outer` on, then `inner` arrives holding `b`: as if `inner` had been there, `b` is on.
+    older.sets.register(
+      new RuleSet('direct', 'b'),
+      new RuleSet('outer', 'a', 'inner')
+    );
+    older.sets.set('b', false);
+    older.sets.set('outer', true);
+    older.sets.register(new RuleSet('inner', 'b'));
+
+    expect(older.ran()).to.eql(['a', 'b', 'c', 'd', 'e', 'f']);
+
+    // `outer` off, then `b` on, then `inner` arrives: `b` was switched since, and stays on.
+    newer.sets.register(
+      new RuleSet('direct', 'b'),
+      new RuleSet('outer', 'a', 'inner')
+    );
+    newer.sets.set('outer', false);
+    newer.sets.set('b', true);
+    newer.sets.register(new RuleSet('inner', 'b', 'c'));
+
+    expect(newer.ran()).to.eql(['b', 'd', 'e', 'f']);
+  });
+
   it('should stop switching once disposed, and give back what it switched off', (): void => {
     const { rules, sets, ran } = setUp(),
       set = new RuleSet('set', 'a');
@@ -848,6 +890,45 @@ describe('RuleSetRegistry kept whole', (): void => {
       )
     ).to.throw(DuplicateRuleSetIdError);
     expect(sets.get('outer')).to.be.null;
+  });
+
+  it('should take in none of a registration whose waiting members it has to refuse', (): void => {
+    const { sets, ran } = setUp();
+
+    sets.register(new RuleSet('taken', 'f'));
+    sets.extend('later', new RuleSet('taken', 'c'));
+
+    expect((): void =>
+      sets.register(
+        new RuleSet('extras', { enabled: false }, 'b'),
+        new RuleSet('later', 'a')
+      )
+    ).to.throw(DuplicateRuleSetIdError);
+    expect(sets.get('extras')).to.be.null;
+    expect(sets.get('later')).to.be.null;
+    expect(ran()).to.eql(['a', 'b', 'c', 'd', 'e', 'f']);
+  });
+
+  it('should tell every registry a set is in of a change, though one of them refuses it', (): void => {
+    const first = setUp(),
+      second = setUp(),
+      shared = new RuleSet('shared', 'a');
+
+    first.sets.register(shared, new RuleSet('taken', 'f'));
+    second.sets.register(shared);
+
+    expect(
+      (): RuleSet =>
+        shared.add(
+          new RuleSet('taken', 'c'),
+          new RuleSet('extras', { enabled: false }, 'b')
+        )
+    ).to.throw(DuplicateRuleSetIdError);
+    // Refused by the first, where the id is taken, and the set after it still taken in; taken in whole by the second.
+    expect(first.sets.get('extras')).to.be.instanceof(RuleSet);
+    expect(first.ran()).to.eql(['a', 'c', 'd', 'e', 'f']);
+    expect(second.sets.get('taken')).to.be.instanceof(RuleSet);
+    expect(second.ran()).to.eql(['a', 'c', 'd', 'e', 'f']);
   });
 
   it('should take a set out with the sets only it held, and leave the others as they are', (): void => {

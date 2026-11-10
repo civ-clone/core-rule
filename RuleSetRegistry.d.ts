@@ -106,8 +106,11 @@ export declare class RuleSetRegistry implements IRuleSetRegistry {
   private _sets;
   private _stopListening;
   private _subscriptions;
-  /** The rules this has switched off: the only ones it will switch back on. */
+  /** The rules this has switched off, each by id: the only ones it will switch back on. */
   private _switchedOff;
+  /** When each setting in `_values` was made, to tell an older one from a newer. */
+  private _setAt;
+  private _settings;
   private _values;
   constructor(rules: RuleRegistry);
   /** The rules these sets switch. */
@@ -224,7 +227,9 @@ export declare class RuleSetRegistry implements IRuleSetRegistry {
   private _apply;
   /**
    * Off: switched off if it is on, and remembered as this registry's doing.
-   * On: switched back on only if it is remembered. See the class comment.
+   * On: switched back on only if it is the very rule remembered: one that has
+   * since been replaced under the same id was never this registry's to switch
+   * on. See the class comment.
    */
   private _switch;
 }
