@@ -11,10 +11,13 @@ class DuplicateRuleIdError extends Error {
 exports.DuplicateRuleIdError = DuplicateRuleIdError;
 class RuleRegistry extends EntityRegistry_1.EntityRegistry {
     constructor() {
-        super(Rule_1.default);
+        super(Rule_1.Rule);
         this._cache = new Map();
+        this._enabled = new Map();
+        this._enabledAt = new Map();
         this._byId = new Map();
         this._constraints = new Map();
+        this._listeners = [];
     }
     entries() {
         const sorted = super
@@ -103,13 +106,13 @@ class RuleRegistry extends EntityRegistry_1.EntityRegistry {
         this.unregister(this._require(id));
         this.register(...rules);
     }
+    // Neither empties the cache: it holds every rule of a type whether on or off, and `get` notices what has been
+    //  switched for itself.
     disableById(id) {
         this._require(id).disable();
-        this.invalidateCache(this._require(id));
     }
     enableById(id) {
         this._require(id).enable();
-        this.invalidateCache(this._require(id));
     }
     /** Register `rules` so they run immediately before the named one. */
     before(id, ...rules) {
@@ -123,16 +126,64 @@ class RuleRegistry extends EntityRegistry_1.EntityRegistry {
         rules.forEach((rule) => this._constraints.set(rule, { side: 'after', id }));
         this.register(...rules);
     }
+    /**
+     * The enabled rules of a type, in the order they run.
+     *
+     * The cache behind it holds every rule of the type, switched on or not. It
+     * used to hold only those enabled when it was built, so a rule switched
+     * back on with `rule.enable()` — which no registry hears — stayed out until
+     * something else emptied the cache (civ-clone/web-renderer#158).
+     *
+     * The answer is kept too, and looked at again only when some rule, anywhere,
+     * has been switched since (`switchCount`): one look at each rule of the type,
+     * and nothing allocated unless one of them was. With every rule on, the
+     * answer is the cache itself.
+     */
     get(ruleType) {
-        if (!this._cache.has(ruleType)) {
-            this._cache.set(ruleType, this.filter((rule) => rule.enabled() && rule instanceof ruleType));
+        var _a;
+        const rules = this._ofType(ruleType), kept = (_a = this._enabled.get(ruleType)) !== null && _a !== void 0 ? _a : rules, switches = (0, Rule_1.switchCount)();
+        if (this._enabledAt.get(ruleType) === switches) {
+            return kept;
         }
-        return this._cache.get(ruleType) || [];
+        this._enabledAt.set(ruleType, switches);
+        let at = 0, current = true;
+        for (let index = 0; index < rules.length; index++) {
+            if (!rules[index].enabled()) {
+                continue;
+            }
+            if (kept[at++] !== rules[index]) {
+                current = false;
+                break;
+            }
+        }
+        if (current && at === kept.length) {
+            return kept;
+        }
+        const enabled = rules.filter((rule) => rule.enabled());
+        // All of them on again: the cache itself is the answer, as it was before any was switched.
+        if (enabled.length === rules.length) {
+            this._enabled.delete(ruleType);
+            return rules;
+        }
+        this._enabled.set(ruleType, enabled);
+        return enabled;
+    }
+    _ofType(ruleType) {
+        const cached = this._cache.get(ruleType);
+        if (cached) {
+            return cached;
+        }
+        const rules = this.filter((rule) => rule instanceof ruleType);
+        this._cache.set(ruleType, rules);
+        return rules;
     }
     invalidateCache(rule) {
-        this._cache.delete(rule instanceof Rule_1.default
+        const ruleType = rule instanceof Rule_1.Rule
             ? rule.constructor
-            : rule);
+            : rule;
+        this._cache.delete(ruleType);
+        this._enabled.delete(ruleType);
+        this._enabledAt.delete(ruleType);
     }
     /**
      * Plain loops rather than `filter().map()`.
@@ -147,9 +198,15 @@ class RuleRegistry extends EntityRegistry_1.EntityRegistry {
      * what `filter().map()` did and is not an incidental detail: a rule's effect
      * can change what a later rule's criteria look at, so interleaving the two
      * passes would be a behavioural change and not an optimisation.
+     *
+     * It walks every rule of the type and not only the enabled ones: `validate`
+     * answers `false` for a rule that is off, so none is processed, and the
+     * loop does not pay for `get`'s look at each rule first. So whether a rule
+     * is on is read when it is that rule's turn to be validated: one switched by
+     * an earlier rule's criterion in the same call is validated as it then is.
      */
     process(ruleType, ...args) {
-        const rules = this.get(ruleType), matched = [];
+        const rules = this._ofType(ruleType), matched = [];
         for (let index = 0; index < rules.length; index++) {
             if (rules[index].validate(...args)) {
                 matched.push(rules[index]);
@@ -180,6 +237,37 @@ class RuleRegistry extends EntityRegistry_1.EntityRegistry {
         });
         super.register(...rules);
         rules.forEach((rule) => this.invalidateCache(rule));
+        if (this._listeners.length === 0) {
+            return;
+        }
+        // Every listener hears of every rule, whatever another listener does: the rules are in by now, so one that
+        //  throws must not leave the rest untold. The first error is thrown once all have been.
+        const errors = [];
+        rules.forEach((rule) => [...this._listeners].forEach((listener) => {
+            try {
+                listener(rule);
+            }
+            catch (error) {
+                errors.push(error);
+            }
+        }));
+        if (errors.length > 0) {
+            throw errors[0];
+        }
+    }
+    /**
+     * Told of each rule as it is registered, after it is in. Returns how to stop
+     * listening.
+     *
+     * For `RuleSetRegistry`, which has to switch off a rule that a set says
+     * starts off whenever that rule arrives: packages load in name order, so a
+     * set is often registered before the rules it names.
+     */
+    onRegister(listener) {
+        this._listeners.push(listener);
+        return () => {
+            this._listeners = this._listeners.filter((other) => other !== listener);
+        };
     }
     unregister(...rules) {
         rules.forEach((rule) => {

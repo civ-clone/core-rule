@@ -1,5 +1,5 @@
 import Priority from '../Priority';
 export declare class Low extends Priority {
-    constructor();
+  constructor();
 }
 export default Low;
