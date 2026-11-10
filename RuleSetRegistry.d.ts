@@ -90,11 +90,13 @@ export interface IRuleSetRegistry {
  * `check()` is for the host to call once every package is in: until then a
  * rule id nothing has registered is not an error, and after it is.
  *
- * One registry to a `RuleRegistry`. Two would each switch the same rules;
- * `dispose()` one before making another for the same rules. (`instance`,
- * below, is the one for the `RuleRegistry` module's own `instance`, and
- * listens to it from the moment this module is imported: with no sets, it
- * switches nothing.)
+ * **One registry to a `RuleRegistry`,** found with `RuleSetRegistry.of(rules)`,
+ * which makes it the first time. Two would each switch the same rules, and
+ * whichever was asked would know only its own sets and choices, so a second
+ * `new RuleSetRegistry(rules)` is refused until the first is disposed.
+ * (`instance`, below, is the one for the `RuleRegistry` module's own
+ * `instance`, and listens to it from the moment this module is imported: with
+ * no sets, it switches nothing.)
  */
 export declare class RuleSetRegistry implements IRuleSetRegistry {
   private _chosen;
@@ -112,12 +114,21 @@ export declare class RuleSetRegistry implements IRuleSetRegistry {
   private _setAt;
   private _settings;
   private _values;
+  /**
+   * The registry for these rules: the one there is, or a new one.
+   *
+   * What a `Game` given only its `rules` uses, so that it has the sets the
+   * packages registered for those rules and not an empty registry of its own
+   * beside them.
+   */
+  static of(rules: RuleRegistry): RuleSetRegistry;
   constructor(rules: RuleRegistry);
   /** The rules these sets switch. */
   ruleRegistry(): RuleRegistry;
   /**
-   * Stops listening to the rules and to its sets, and switches back on what
-   * it had switched off. For a registry that is being replaced.
+   * Stops listening to the rules and to its sets, switches back on what it
+   * had switched off, and is no longer the registry `of` these rules. For one
+   * that is being replaced.
    */
   dispose(): void;
   /** Every set, in the order registered, whether or not another holds it. */

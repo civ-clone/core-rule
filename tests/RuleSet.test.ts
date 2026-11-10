@@ -3,8 +3,13 @@ import {
   RuleSetCycleError,
   RuleSetRegistry,
   UnknownRuleSetError,
+  instance as ruleSetRegistryInstance,
 } from '../RuleSetRegistry';
-import { RuleRegistry, UnknownRuleError } from '../RuleRegistry';
+import {
+  RuleRegistry,
+  UnknownRuleError,
+  instance as ruleRegistryInstance,
+} from '../RuleRegistry';
 import { RuleSet, RuleSetError } from '../RuleSet';
 import Criterion from '../Criterion';
 import Effect from '../Effect';
@@ -870,6 +875,31 @@ describe('RuleSetRegistry and what it leaves alone', (): void => {
     sets.dispose();
 
     expect(rule.enabled()).to.be.true;
+  });
+
+  it('should be the one registry of its rules, found again and not made twice', (): void => {
+    const { rules, sets } = setUp();
+
+    expect(RuleSetRegistry.of(rules)).to.equal(sets);
+    expect((): RuleSetRegistry => new RuleSetRegistry(rules)).to.throw(
+      RuleSetError
+    );
+
+    sets.dispose();
+
+    const next = RuleSetRegistry.of(rules);
+
+    expect(next).to.not.equal(sets);
+    expect(RuleSetRegistry.of(rules)).to.equal(next);
+    expect(RuleSetRegistry.of(new RuleRegistry()).ruleRegistry()).to.not.equal(
+      rules
+    );
+  });
+
+  it('should have the module instance for the module rules', (): void => {
+    expect(RuleSetRegistry.of(ruleRegistryInstance)).to.equal(
+      ruleSetRegistryInstance
+    );
   });
 
   it('should know the rules it switches', (): void => {
