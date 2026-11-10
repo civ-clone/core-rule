@@ -201,7 +201,9 @@ class RuleRegistry extends EntityRegistry_1.EntityRegistry {
      *
      * It walks every rule of the type and not only the enabled ones: `validate`
      * answers `false` for a rule that is off, so none is processed, and the
-     * loop does not pay for `get`'s look at each rule first.
+     * loop does not pay for `get`'s look at each rule first. So whether a rule
+     * is on is read when it is that rule's turn to be validated: one switched by
+     * an earlier rule's criterion in the same call is validated as it then is.
      */
     process(ruleType, ...args) {
         const rules = this._ofType(ruleType), matched = [];

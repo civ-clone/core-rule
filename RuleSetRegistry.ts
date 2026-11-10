@@ -3,7 +3,13 @@ import {
   UnknownRuleError,
   instance as ruleRegistryInstance,
 } from './RuleRegistry';
-import { RuleSet, RuleSetEntry, RuleSetError } from './RuleSet';
+import {
+  RuleSet,
+  RuleSetEntry,
+  RuleSetError,
+  RuleSetMember,
+  idOf,
+} from './RuleSet';
 import Rule from './Rule';
 
 export class UnknownRuleSetError extends RuleSetError {}
@@ -84,10 +90,12 @@ export interface IRuleSetRegistry {
  * - `choose(id, member)` for a choice.
  *
  * **It only switches off, and only switches back on what it switched off.** A
- * rule the tree says should run is left exactly as it is, so a rule that play
- * has switched off for its own reasons (`rule.disable()`, as several packages
- * do for a moment at a time) is not switched back on by a change to some
- * other set. `state()` is what the sets say, not `rule.enabled()`.
+ * rule the tree says should run is left exactly as it is, and a rule that is
+ * already off when the tree says it should be is not counted as this
+ * registry's. So a rule that play has switched off for its own reasons
+ * (`rule.disable()`, as several packages do for a moment at a time), or that a
+ * package registers switched off, is not switched on by a set being switched
+ * off and on again. `state()` is what the sets say, not `rule.enabled()`.
  *
  * **Rules are switched as they arrive.** Packages load in name order, so a set
  * is often registered before the rules it names. The registry listens to the
@@ -97,14 +105,17 @@ export interface IRuleSetRegistry {
  * rule id nothing has registered is not an error, and after it is.
  *
  * One registry to a `RuleRegistry`. Two would each switch the same rules;
- * `dispose()` one before making another for the same rules.
+ * `dispose()` one before making another for the same rules. (`instance`,
+ * below, is the one for the `RuleRegistry` module's own `instance`, and
+ * listens to it from the moment this module is imported: with no sets, it
+ * switches nothing.)
  */
 export class RuleSetRegistry implements IRuleSetRegistry {
   private _chosen: Map<string, string> = new Map();
   /** The rules that start off, worked out when first asked after the tree changes. */
   private _defaultOff: Set<string> | null = null;
   private _effective: Map<string, boolean> = new Map();
-  private _pending: Map<string, RuleSetEntry[]> = new Map();
+  private _pending: Map<string, RuleSetMember[]> = new Map();
   private _rules: RuleRegistry;
   private _sets: Map<string, RuleSet> = new Map();
   private _stopListening: () => void;
@@ -119,11 +130,13 @@ export class RuleSetRegistry implements IRuleSetRegistry {
     this._stopListening = rules.onRegister((rule: Rule): void => {
       const id = rule.id();
 
-      // A new rule under an id that should be off: this one has not been switched yet, whatever the last was.
-      if (id !== null && this._effective.get(id) === false) {
-        this._switchedOff.delete(id);
-        this._switch(id, false);
+      if (id === null) {
+        return;
       }
+
+      // Off if the sets say so; and back on if this is a rule that was switched off and has since left every set, or
+      //  was unregistered while its set was switched back on.
+      this._switch(id, this._effective.get(id) ?? true);
     });
   }
 
@@ -209,10 +222,32 @@ export class RuleSetRegistry implements IRuleSetRegistry {
 
   /**
    * Taken out, along with the sets given to it as members that nothing else
-   * registered holds, and its id out of every set that held it: an id left
-   * behind would be read as a rule's.
+   * registered holds.
+   *
+   * No other set is changed: sets are their package's own objects, and may be
+   * in another game's registry too. A set that names this one by id keeps the
+   * id, which `check()` then reports unless a set is registered under it
+   * again, as when one is swapped for another. A registered set that was
+   * *given* this one holds the set itself, and would put it straight back, so
+   * that is refused: take it out of there first.
    */
   unregister(...sets: RuleSet[]): void {
+    sets.forEach((set) => {
+      const holder = this.entries().find(
+        (other) =>
+          !sets.includes(other) &&
+          this._sets.get(set.id()) === set &&
+          other.members().includes(set)
+      );
+
+      if (holder) {
+        throw new RuleSetError(
+          `RuleSet '${set.id()}' is a member of '${holder.id()}', which is ` +
+            'still registered: remove it from there first.'
+        );
+      }
+    });
+
     const drop = (set: RuleSet): void => {
       if (this._sets.get(set.id()) !== set) {
         return;
@@ -226,24 +261,17 @@ export class RuleSetRegistry implements IRuleSetRegistry {
       set.members().forEach((member) => {
         if (
           member instanceof RuleSet &&
-          !this.entries().some((other) => other.has(member))
+          !this.entries().some((other) => other.members().includes(member))
         ) {
           drop(member);
         }
       });
     };
 
-    try {
-      sets.forEach((set) => {
-        drop(set);
+    sets.forEach(drop);
 
-        // Each tells its subscription, which prunes and applies.
-        this.entries().forEach((other) => other.remove(set.id()));
-      });
-    } finally {
-      this._defaultOff = null;
-      this._apply();
-    }
+    this._defaultOff = null;
+    this._apply();
   }
 
   /**
@@ -262,7 +290,19 @@ export class RuleSetRegistry implements IRuleSetRegistry {
       return;
     }
 
-    this._pending.set(id, [...(this._pending.get(id) ?? []), ...members]);
+    // Looked at now, as `add` would: a member that can't be one should fail here, where it was given, and not in
+    //  whichever package registers the set later.
+    const held = members.map((member): RuleSetMember => {
+      const memberId = idOf(member);
+
+      if (memberId === id) {
+        throw new RuleSetError(`RuleSet '${id}' cannot be a member of itself.`);
+      }
+
+      return member instanceof RuleSet ? member : memberId;
+    });
+
+    this._pending.set(id, [...(this._pending.get(id) ?? []), ...held]);
   }
 
   /**
@@ -613,6 +653,20 @@ export class RuleSetRegistry implements IRuleSetRegistry {
     }
 
     this._adoptMembers(set);
+
+    // Switched before it arrived, through a set that named it by id: until now the id was taken for a rule's, and
+    //  the setting was kept against it. It passes to the rules the set switches, except any switched themselves since.
+    const held = this._values.get(set.id());
+
+    if (held !== undefined) {
+      this._values.delete(set.id());
+
+      this._leaves(set.id()).forEach((leaf) => {
+        if (!this._values.has(leaf)) {
+          this._values.set(leaf, held);
+        }
+      });
+    }
   }
 
   private _adoptMembers(set: RuleSet): void {
@@ -840,27 +894,29 @@ export class RuleSetRegistry implements IRuleSetRegistry {
   }
 
   /**
-   * Off: switched off, once, and remembered. On: switched back on only if
-   * this is what switched it off. See the class comment.
+   * Off: switched off if it is on, and remembered as this registry's doing.
+   * On: switched back on only if it is remembered. See the class comment.
    */
   private _switch(id: string, on: boolean): void {
     const rule = this._rules.getById(id);
 
+    // Not registered, yet or any more: `onRegister` switches it when it is, and what is remembered is kept until then.
+    if (rule === null) {
+      return;
+    }
+
     if (on) {
-      if (this._switchedOff.delete(id) && rule !== null) {
+      if (this._switchedOff.delete(id)) {
         this._rules.enableById(id);
       }
 
       return;
     }
 
-    // Not registered yet: `onRegister` switches it when it is.
-    if (rule === null || this._switchedOff.has(id)) {
-      return;
+    if (rule.enabled()) {
+      this._switchedOff.add(id);
+      this._rules.disableById(id);
     }
-
-    this._switchedOff.add(id);
-    this._rules.disableById(id);
   }
 }
 

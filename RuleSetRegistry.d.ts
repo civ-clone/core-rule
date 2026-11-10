@@ -76,10 +76,12 @@ export interface IRuleSetRegistry {
  * - `choose(id, member)` for a choice.
  *
  * **It only switches off, and only switches back on what it switched off.** A
- * rule the tree says should run is left exactly as it is, so a rule that play
- * has switched off for its own reasons (`rule.disable()`, as several packages
- * do for a moment at a time) is not switched back on by a change to some
- * other set. `state()` is what the sets say, not `rule.enabled()`.
+ * rule the tree says should run is left exactly as it is, and a rule that is
+ * already off when the tree says it should be is not counted as this
+ * registry's. So a rule that play has switched off for its own reasons
+ * (`rule.disable()`, as several packages do for a moment at a time), or that a
+ * package registers switched off, is not switched on by a set being switched
+ * off and on again. `state()` is what the sets say, not `rule.enabled()`.
  *
  * **Rules are switched as they arrive.** Packages load in name order, so a set
  * is often registered before the rules it names. The registry listens to the
@@ -89,7 +91,10 @@ export interface IRuleSetRegistry {
  * rule id nothing has registered is not an error, and after it is.
  *
  * One registry to a `RuleRegistry`. Two would each switch the same rules;
- * `dispose()` one before making another for the same rules.
+ * `dispose()` one before making another for the same rules. (`instance`,
+ * below, is the one for the `RuleRegistry` module's own `instance`, and
+ * listens to it from the moment this module is imported: with no sets, it
+ * switches nothing.)
  */
 export declare class RuleSetRegistry implements IRuleSetRegistry {
   private _chosen;
@@ -127,8 +132,14 @@ export declare class RuleSetRegistry implements IRuleSetRegistry {
   register(...sets: RuleSet[]): void;
   /**
    * Taken out, along with the sets given to it as members that nothing else
-   * registered holds, and its id out of every set that held it: an id left
-   * behind would be read as a rule's.
+   * registered holds.
+   *
+   * No other set is changed: sets are their package's own objects, and may be
+   * in another game's registry too. A set that names this one by id keeps the
+   * id, which `check()` then reports unless a set is registered under it
+   * again, as when one is swapped for another. A registered set that was
+   * *given* this one holds the set itself, and would put it straight back, so
+   * that is refused: take it out of there first.
    */
   unregister(...sets: RuleSet[]): void;
   /**
@@ -212,8 +223,8 @@ export declare class RuleSetRegistry implements IRuleSetRegistry {
   private _evaluate;
   private _apply;
   /**
-   * Off: switched off, once, and remembered. On: switched back on only if
-   * this is what switched it off. See the class comment.
+   * Off: switched off if it is on, and remembered as this registry's doing.
+   * On: switched back on only if it is remembered. See the class comment.
    */
   private _switch;
 }

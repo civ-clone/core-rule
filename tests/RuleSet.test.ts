@@ -6,6 +6,7 @@ import {
 } from '../RuleSetRegistry';
 import { RuleRegistry, UnknownRuleError } from '../RuleRegistry';
 import { RuleSet, RuleSetError } from '../RuleSet';
+import Criterion from '../Criterion';
 import Effect from '../Effect';
 import Rule from '../Rule';
 import { expect } from 'chai';
@@ -746,6 +747,59 @@ describe('RuleSetRegistry and what it leaves alone', (): void => {
     expect(rules.process(Example)).to.eql(['c']);
   });
 
+  it('should not switch on a rule that was already off when its set was switched off', (): void => {
+    const { rules, sets, ran } = setUp();
+
+    sets.register(new RuleSet('set', 'a', 'b'));
+
+    rules.getById('a')!.disable();
+    sets.set('set', false);
+    sets.set('set', true);
+
+    expect(ran()).to.eql(['b', 'c', 'd', 'e', 'f']);
+  });
+
+  it('should switch back on a rule that was unregistered while its set was switched on again', (): void => {
+    const { rules, sets, ran } = setUp(),
+      rule = rules.getById('a')!;
+
+    sets.register(new RuleSet('set', 'a'));
+    sets.set('set', false);
+    rules.unregister(rule);
+    sets.set('set', true);
+    rules.register(rule);
+
+    expect(rule.enabled()).to.be.true;
+    expect(ran()).to.include('a');
+  });
+
+  it('should switch the rules of a set that was switched before it arrived', (): void => {
+    const { sets, ran } = setUp();
+
+    sets.register(new RuleSet('outer', 'a', 'inner'));
+    sets.set('outer', false);
+    sets.register(new RuleSet('inner', 'b', 'deeper'));
+    sets.register(new RuleSet('deeper', 'c'));
+
+    expect(sets.state('outer')).to.equal('off');
+    expect(sets.choices()).to.eql([{ id: 'outer', value: false }]);
+    expect(ran()).to.eql(['d', 'e', 'f']);
+  });
+
+  it('should refuse a member given for a set that is not there yet, when it is given', (): void => {
+    const { sets } = setUp();
+
+    expect((): void => sets.extend('later', new Example())).to.throw(
+      RuleSetError
+    );
+    expect((): void => sets.extend('later', 'later')).to.throw(RuleSetError);
+
+    sets.register(new RuleSet('later', 'a'));
+
+    expect(sets.get('later')!.memberIds()).to.eql(['a']);
+    expect((): void => sets.check()).not.to.throw();
+  });
+
   it('should stop switching once disposed, and give back what it switched off', (): void => {
     const { rules, sets, ran } = setUp(),
       set = new RuleSet('set', 'a');
@@ -796,25 +850,49 @@ describe('RuleSetRegistry kept whole', (): void => {
     expect(sets.get('outer')).to.be.null;
   });
 
-  it('should take a set out of the sets that held it, with the sets only it held', (): void => {
+  it('should take a set out with the sets only it held, and leave the others as they are', (): void => {
     const { sets, ran } = setUp(),
       shared = new RuleSet('shared', 'd'),
       deep = new RuleSet('deep', 'c'),
       inner = new RuleSet('inner', 'b', deep, shared),
-      outer = new RuleSet('outer', 'a', inner),
+      outer = new RuleSet('outer', 'a', 'inner'),
       other = new RuleSet('other', shared);
 
-    sets.register(outer, other);
+    sets.register(outer, inner, other);
     sets.set('outer', false);
     sets.unregister(inner);
 
     expect(sets.get('inner')).to.be.null;
     expect(sets.get('deep')).to.be.null;
     expect(sets.get('shared')).to.equal(shared);
-    expect(outer.memberIds()).to.eql(['a']);
-    expect(sets.state('outer')).to.equal('off');
+    // `outer` is its package's, and still names `inner`: which `check()` now reports.
+    expect(outer.memberIds()).to.eql(['a', 'inner']);
+    expect((): void => sets.check()).to.throw(UnknownRuleError);
     // `b` and `c` are in no set now; `d` still is, and is still off.
     expect(ran()).to.eql(['b', 'c', 'e', 'f']);
+
+    // Swapped for another under the same id, it is `outer`'s member again, and switched with it.
+    sets.register(new RuleSet('inner', 'b'));
+    sets.set('outer', false);
+
+    expect((): void => sets.check()).not.to.throw();
+    expect(ran()).to.eql(['c', 'e', 'f']);
+  });
+
+  it('should refuse to take out a set that a registered set was given', (): void => {
+    const { sets } = setUp(),
+      inner = new RuleSet('inner', 'b'),
+      outer = new RuleSet('outer', 'a', inner);
+
+    sets.register(outer);
+
+    expect((): void => sets.unregister(inner)).to.throw(RuleSetError);
+    expect(sets.get('inner')).to.equal(inner);
+
+    // Both at once is fine, as is taking it out of `outer` first.
+    sets.unregister(outer, inner);
+
+    expect(sets.entries()).to.eql([]);
   });
 
   it('should forget a choice whose member is removed, even if it comes back', (): void => {
@@ -966,6 +1044,25 @@ describe('RuleRegistry and rules switched directly', (): void => {
 
     expect(rules.process(Example)).to.eql(['a', 'b']);
     expect(rules.get(Example)).to.have.length(2);
+  });
+
+  it('should validate a rule as it is when its turn comes, though an earlier rule switched it', (): void => {
+    const rules = new RuleRegistry(),
+      late = named('late'),
+      early = new Example(
+        'early',
+        new Criterion((): boolean => {
+          late.enable();
+
+          return true;
+        }),
+        new Effect((): string => 'early')
+      );
+
+    late.disable();
+    rules.register(early, late);
+
+    expect(rules.process(Example)).to.eql(['early', 'late']);
   });
 
   it('should answer with the same list until a rule is switched', (): void => {
