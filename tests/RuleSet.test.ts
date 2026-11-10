@@ -860,6 +860,18 @@ describe('RuleSetRegistry and what it leaves alone', (): void => {
     expect(ran()).to.eql(['b', 'c', 'd', 'e', 'f', 'a']);
   });
 
+  it('should give back a rule it switched off that is not registered when it is disposed', (): void => {
+    const { rules, sets } = setUp(),
+      rule = rules.getById('a')!;
+
+    sets.register(new RuleSet('set', 'a'));
+    sets.set('set', false);
+    rules.unregister(rule);
+    sets.dispose();
+
+    expect(rule.enabled()).to.be.true;
+  });
+
   it('should know the rules it switches', (): void => {
     const { rules, sets } = setUp();
 
@@ -958,6 +970,25 @@ describe('RuleSetRegistry kept whole', (): void => {
 
     expect((): void => sets.check()).not.to.throw();
     expect(ran()).to.eql(['c', 'e', 'f']);
+  });
+
+  it('should keep a set that another still names by id, whichever is taken out first', (): void => {
+    const { sets, ran } = setUp(),
+      child = new RuleSet('child', { enabled: false }, 'b'),
+      outer = new RuleSet('outer', 'a', child),
+      other = new RuleSet('other', 'child');
+
+    sets.register(outer, other);
+    sets.unregister(outer);
+
+    expect(sets.get('child')).to.equal(child);
+    expect((): void => sets.check()).not.to.throw();
+    expect(ran()).to.eql(['a', 'c', 'd', 'e', 'f']);
+
+    sets.unregister(other);
+
+    // Named only by id, so it was never `other`'s to take with it.
+    expect(sets.get('child')).to.equal(child);
   });
 
   it('should refuse to take out a set that a registered set was given', (): void => {

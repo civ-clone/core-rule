@@ -97,7 +97,11 @@ class RuleSetRegistry {
         this._setAt.clear();
         this._chosen.clear();
         this._defaultOff = null;
-        this._apply();
+        this._effective = new Map();
+        // By the rule and not its id: one that is not registered just now would otherwise stay off for good, since
+        //  nothing is listening for it to come back.
+        this._switchedOff.forEach((rule) => rule.enable());
+        this._switchedOff.clear();
     }
     /** Every set, in the order registered, whether or not another holds it. */
     entries() {
@@ -167,7 +171,9 @@ class RuleSetRegistry {
                     'still registered: remove it from there first.');
             }
         });
-        const drop = (set) => {
+        // The sets named first, all of them, and then whichever of the sets they were given nothing still registered
+        //  names, by the set or by its id: so it does not matter which of two sets holding a third is named first.
+        const orphans = [], drop = (set) => {
             var _a;
             if (this._sets.get(set.id()) !== set) {
                 return;
@@ -177,13 +183,18 @@ class RuleSetRegistry {
             (_a = this._subscriptions.get(set)) === null || _a === void 0 ? void 0 : _a();
             this._subscriptions.delete(set);
             set.members().forEach((member) => {
-                if (member instanceof RuleSet_1.RuleSet &&
-                    !this.entries().some((other) => other.members().includes(member))) {
-                    drop(member);
+                if (member instanceof RuleSet_1.RuleSet) {
+                    orphans.push(member);
                 }
             });
         };
         sets.forEach(drop);
+        while (orphans.length > 0) {
+            const orphan = orphans.shift();
+            if (!this.entries().some((other) => other.has(orphan))) {
+                drop(orphan);
+            }
+        }
         this._defaultOff = null;
         this._apply();
     }
