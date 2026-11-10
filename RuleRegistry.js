@@ -11,8 +11,10 @@ class DuplicateRuleIdError extends Error {
 exports.DuplicateRuleIdError = DuplicateRuleIdError;
 class RuleRegistry extends EntityRegistry_1.EntityRegistry {
     constructor() {
-        super(Rule_1.default);
+        super(Rule_1.Rule);
         this._cache = new Map();
+        this._enabled = new Map();
+        this._enabledAt = new Map();
         this._byId = new Map();
         this._constraints = new Map();
         this._listeners = [];
@@ -104,13 +106,13 @@ class RuleRegistry extends EntityRegistry_1.EntityRegistry {
         this.unregister(this._require(id));
         this.register(...rules);
     }
+    // Neither empties the cache: it holds every rule of a type whether on or off, and `get` notices what has been
+    //  switched for itself.
     disableById(id) {
         this._require(id).disable();
-        this.invalidateCache(this._require(id));
     }
     enableById(id) {
         this._require(id).enable();
-        this.invalidateCache(this._require(id));
     }
     /** Register `rules` so they run immediately before the named one. */
     before(id, ...rules) {
@@ -127,20 +129,44 @@ class RuleRegistry extends EntityRegistry_1.EntityRegistry {
     /**
      * The enabled rules of a type, in the order they run.
      *
-     * The cache behind it holds every rule of the type, switched on or not, and
-     * this leaves out the ones that are off as it is asked. It used to cache
-     * only those enabled when it was built, so a rule switched back on with
-     * `rule.enable()` — which no registry hears — stayed out until something
-     * else emptied the cache (civ-clone/web-renderer#158).
+     * The cache behind it holds every rule of the type, switched on or not. It
+     * used to hold only those enabled when it was built, so a rule switched
+     * back on with `rule.enable()` — which no registry hears — stayed out until
+     * something else emptied the cache (civ-clone/web-renderer#158).
+     *
+     * The answer is kept too, and looked at again only when some rule, anywhere,
+     * has been switched since (`switchCount`): one look at each rule of the type,
+     * and nothing allocated unless one of them was. With every rule on, the
+     * answer is the cache itself.
      */
     get(ruleType) {
-        const rules = this._ofType(ruleType);
+        var _a;
+        const rules = this._ofType(ruleType), kept = (_a = this._enabled.get(ruleType)) !== null && _a !== void 0 ? _a : rules, switches = (0, Rule_1.switchCount)();
+        if (this._enabledAt.get(ruleType) === switches) {
+            return kept;
+        }
+        this._enabledAt.set(ruleType, switches);
+        let at = 0, current = true;
         for (let index = 0; index < rules.length; index++) {
             if (!rules[index].enabled()) {
-                return rules.filter((rule) => rule.enabled());
+                continue;
+            }
+            if (kept[at++] !== rules[index]) {
+                current = false;
+                break;
             }
         }
-        return rules;
+        if (current && at === kept.length) {
+            return kept;
+        }
+        const enabled = rules.filter((rule) => rule.enabled());
+        // All of them on again: the cache itself is the answer, as it was before any was switched.
+        if (enabled.length === rules.length) {
+            this._enabled.delete(ruleType);
+            return rules;
+        }
+        this._enabled.set(ruleType, enabled);
+        return enabled;
     }
     _ofType(ruleType) {
         const cached = this._cache.get(ruleType);
@@ -152,9 +178,12 @@ class RuleRegistry extends EntityRegistry_1.EntityRegistry {
         return rules;
     }
     invalidateCache(rule) {
-        this._cache.delete(rule instanceof Rule_1.default
+        const ruleType = rule instanceof Rule_1.Rule
             ? rule.constructor
-            : rule);
+            : rule;
+        this._cache.delete(ruleType);
+        this._enabled.delete(ruleType);
+        this._enabledAt.delete(ruleType);
     }
     /**
      * Plain loops rather than `filter().map()`.
@@ -206,8 +235,22 @@ class RuleRegistry extends EntityRegistry_1.EntityRegistry {
         });
         super.register(...rules);
         rules.forEach((rule) => this.invalidateCache(rule));
-        if (this._listeners.length > 0) {
-            rules.forEach((rule) => [...this._listeners].forEach((listener) => listener(rule)));
+        if (this._listeners.length === 0) {
+            return;
+        }
+        // Every listener hears of every rule, whatever another listener does: the rules are in by now, so one that
+        //  throws must not leave the rest untold. The first error is thrown once all have been.
+        const errors = [];
+        rules.forEach((rule) => [...this._listeners].forEach((listener) => {
+            try {
+                listener(rule);
+            }
+            catch (error) {
+                errors.push(error);
+            }
+        }));
+        if (errors.length > 0) {
+            throw errors[0];
         }
     }
     /**

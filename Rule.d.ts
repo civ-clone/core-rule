@@ -10,6 +10,7 @@ export interface IRule<C extends any[] = any[], R = any> {
   process(...args: C): R | void;
   validate(...args: C): boolean;
 }
+export declare const switchCount: () => number;
 export declare class Rule<C extends any[] = any[], R = any>
   implements IRule<C, R>
 {

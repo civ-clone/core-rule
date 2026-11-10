@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.RuleSetRegistry = exports.RuleSetCycleError = exports.DuplicateRuleSetIdError = exports.UnknownRuleSetError = void 0;
+exports.instance = exports.RuleSetRegistry = exports.RuleSetCycleError = exports.DuplicateRuleSetIdError = exports.UnknownRuleSetError = void 0;
 const RuleRegistry_1 = require("./RuleRegistry");
 const RuleSet_1 = require("./RuleSet");
 class UnknownRuleSetError extends RuleSet_1.RuleSetError {
@@ -27,8 +27,15 @@ exports.RuleSetCycleError = RuleSetCycleError;
  * - `set(id, on)` for a rule, or for a plain set, where it reaches every rule
  *   beneath, through the sets inside it. It stops at a choice: a choice always
  *   has exactly one member on, and switching its parent off does not change
- *   that.
+ *   that. The same goes for a set that starts off: `{ enabled: false }` does
+ *   not reach into a choice inside it.
  * - `choose(id, member)` for a choice.
+ *
+ * **It only switches off, and only switches back on what it switched off.** A
+ * rule the tree says should run is left exactly as it is, so a rule that play
+ * has switched off for its own reasons (`rule.disable()`, as several packages
+ * do for a moment at a time) is not switched back on by a change to some
+ * other set. `state()` is what the sets say, not `rule.enabled()`.
  *
  * **Rules are switched as they arrive.** Packages load in name order, so a set
  * is often registered before the rules it names. The registry listens to the
@@ -36,6 +43,9 @@ exports.RuleSetCycleError = RuleSetCycleError;
  * moment it is registered, and no host has to remember to apply anything.
  * `check()` is for the host to call once every package is in: until then a
  * rule id nothing has registered is not an error, and after it is.
+ *
+ * One registry to a `RuleRegistry`. Two would each switch the same rules;
+ * `dispose()` one before making another for the same rules.
  */
 class RuleSetRegistry {
     constructor(rules) {
@@ -46,16 +56,37 @@ class RuleSetRegistry {
         this._pending = new Map();
         this._sets = new Map();
         this._subscriptions = new Map();
-        /** The rules this has switched off, to switch back on if they leave every set. */
+        /** The rules this has switched off: the only ones it will switch back on. */
         this._switchedOff = new Set();
         this._values = new Map();
         this._rules = rules;
-        rules.onRegister((rule) => {
+        this._stopListening = rules.onRegister((rule) => {
             const id = rule.id();
-            if (id !== null && this._effective.has(id)) {
-                this._switch(id, this._effective.get(id));
+            // A new rule under an id that should be off: this one has not been switched yet, whatever the last was.
+            if (id !== null && this._effective.get(id) === false) {
+                this._switchedOff.delete(id);
+                this._switch(id, false);
             }
         });
+    }
+    /** The rules these sets switch. */
+    ruleRegistry() {
+        return this._rules;
+    }
+    /**
+     * Stops listening to the rules and to its sets, and switches back on what
+     * it had switched off. For a registry that is being replaced.
+     */
+    dispose() {
+        this._stopListening();
+        this._subscriptions.forEach((stop) => stop());
+        this._subscriptions.clear();
+        this._sets.clear();
+        this._pending.clear();
+        this._values.clear();
+        this._chosen.clear();
+        this._defaultOff = null;
+        this._apply();
     }
     /** Every set, in the order registered, whether or not another holds it. */
     entries() {
@@ -75,25 +106,67 @@ class RuleSetRegistry {
      * A set, and every set given to it as a member, and theirs.
      *
      * Two sets under one id are refused, as two rules under one id are: one of
-     * them could never be switched.
+     * them could never be switched. All of them are looked at before any is
+     * taken in, so a refusal leaves the registry as it was.
      */
     register(...sets) {
-        sets.forEach((set) => this._adopt(set));
-        this._apply();
+        const incoming = new Map(), look = (set) => {
+            var _a;
+            const known = (_a = incoming.get(set.id())) !== null && _a !== void 0 ? _a : this._sets.get(set.id());
+            if (known === set) {
+                return;
+            }
+            if (known) {
+                throw this._duplicate(set.id());
+            }
+            incoming.set(set.id(), set);
+            set.members().forEach((member) => {
+                if (member instanceof RuleSet_1.RuleSet) {
+                    look(member);
+                }
+            });
+        };
+        sets.forEach(look);
+        try {
+            sets.forEach((set) => this._adopt(set));
+        }
+        finally {
+            this._apply();
+        }
     }
+    /**
+     * Taken out, along with the sets given to it as members that nothing else
+     * registered holds, and its id out of every set that held it: an id left
+     * behind would be read as a rule's.
+     */
     unregister(...sets) {
-        sets.forEach((set) => {
+        const drop = (set) => {
             var _a;
             if (this._sets.get(set.id()) !== set) {
                 return;
             }
             this._sets.delete(set.id());
-            this._defaultOff = null;
             this._chosen.delete(set.id());
             (_a = this._subscriptions.get(set)) === null || _a === void 0 ? void 0 : _a();
             this._subscriptions.delete(set);
-        });
-        this._apply();
+            set.members().forEach((member) => {
+                if (member instanceof RuleSet_1.RuleSet &&
+                    !this.entries().some((other) => other.has(member))) {
+                    drop(member);
+                }
+            });
+        };
+        try {
+            sets.forEach((set) => {
+                drop(set);
+                // Each tells its subscription, which prunes and applies.
+                this.entries().forEach((other) => other.remove(set.id()));
+            });
+        }
+        finally {
+            this._defaultOff = null;
+            this._apply();
+        }
     }
     /**
      * Add members to the set registered as `id`, now or when it arrives.
@@ -115,7 +188,8 @@ class RuleSetRegistry {
      * Switch a rule, or every rule a plain set reaches, on or off.
      *
      * Throws for an id that is neither a registered set nor a rule some set
-     * holds, and for a choice, which is chosen from and not switched.
+     * holds, for a choice, which is chosen from and not switched, and for a set
+     * with nothing to switch (see `RuleSetDescription.switchable`).
      */
     set(id, on) {
         this._set(id, on);
@@ -207,7 +281,7 @@ class RuleSetRegistry {
             }
             path.delete(id);
         };
-        this.roots().forEach((root) => visit(root.id(), false, new Set()));
+        this._tops().forEach((top) => visit(top.id(), false, new Set()));
         return choices;
     }
     /**
@@ -220,22 +294,29 @@ class RuleSetRegistry {
         const unknown = [];
         this._values.clear();
         this._chosen.clear();
-        choices.forEach((choice) => {
-            try {
-                if (typeof choice.value === 'string') {
-                    this._choose(choice.id, choice.value);
-                    return;
+        try {
+            choices.forEach((choice) => {
+                try {
+                    if (typeof choice.value === 'string') {
+                        this._choose(choice.id, choice.value);
+                        return;
+                    }
+                    if (typeof choice.value !== 'boolean') {
+                        throw new RuleSet_1.RuleSetError(`A choice is switched (a boolean) or picked (an id): '${choice.id}' is neither.`);
+                    }
+                    this._set(choice.id, choice.value);
                 }
-                this._set(choice.id, choice.value);
-            }
-            catch (error) {
-                if (!(error instanceof RuleSet_1.RuleSetError)) {
-                    throw error;
+                catch (error) {
+                    if (!(error instanceof RuleSet_1.RuleSetError)) {
+                        throw error;
+                    }
+                    unknown.push(choice);
                 }
-                unknown.push(choice);
-            }
-        });
-        this._apply();
+            });
+        }
+        finally {
+            this._apply();
+        }
         return unknown;
     }
     /** Everything back as the sets declare it. */
@@ -244,7 +325,7 @@ class RuleSetRegistry {
         this._chosen.clear();
         this._apply();
     }
-    /** The whole tree from `roots()`, for a UI to draw. */
+    /** The whole tree, from the sets no other holds, for a UI to draw. */
     describe() {
         const describe = (id, active, path) => {
             const set = this._sets.get(id);
@@ -254,6 +335,7 @@ class RuleSetRegistry {
                     kind: 'rule',
                     state: this._value(id) ? 'on' : 'off',
                     active,
+                    switchable: true,
                     members: [],
                 };
             }
@@ -262,15 +344,30 @@ class RuleSetRegistry {
                 .filter((member) => !inside.has(member))
                 .map((member) => describe(member, active && (!set.exclusive() || member === chosen), inside));
             return set.exclusive()
-                ? { id, kind: 'choice', state: 'on', active, chosen, members }
-                : { id, kind: 'set', state: this.state(id), active, members };
+                ? {
+                    id,
+                    kind: 'choice',
+                    state: 'on',
+                    active,
+                    switchable: false,
+                    chosen,
+                    members,
+                }
+                : {
+                    id,
+                    kind: 'set',
+                    state: this.state(id),
+                    active,
+                    switchable: this._leaves(id).length > 0,
+                    members,
+                };
         };
-        return this.roots().map((root) => describe(root.id(), true, new Set()));
+        return this._tops().map((top) => describe(top.id(), true, new Set()));
     }
     /**
      * For the host, once every package has loaded: throws for a rule id that
      * nothing registered, a set `extend` was given members for that never
-     * arrived, and a set that is inside itself.
+     * arrived, a set under the id of a rule, and a set that is inside itself.
      *
      * Until then none of those is an error, since the package that settles it
      * may simply not have loaded yet. After it, each is a typo or a missing
@@ -285,6 +382,12 @@ class RuleSetRegistry {
                 .sort()
                 .join(', ')}.`);
         }
+        this._sets.forEach((set) => {
+            if (this._rules.getById(set.id()) !== null) {
+                throw new DuplicateRuleSetIdError(`'${set.id()}' is the id of a rule set and of a rule. A set that ` +
+                    'names it would mean the set, and the rule could not be reached.');
+            }
+        });
         const walk = (id, path) => {
             const set = this._sets.get(id);
             if (!set) {
@@ -301,22 +404,34 @@ class RuleSetRegistry {
         };
         this._sets.forEach((set) => walk(set.id(), []));
     }
+    _duplicate(id) {
+        return new DuplicateRuleSetIdError(`Two rule sets claim the id '${id}'. An id addresses one set, so one ` +
+            'of them could never be switched. To add to a set that exists, use ' +
+            '`extend`.');
+    }
     _adopt(set) {
         const existing = this._sets.get(set.id());
         if (existing === set) {
             return;
         }
         if (existing) {
-            throw new DuplicateRuleSetIdError(`Two rule sets claim the id '${set.id()}'. An id addresses one set, ` +
-                'so one of them could never be switched. To add to a set that ' +
-                'exists, use `extend`.');
+            throw this._duplicate(set.id());
         }
         this._sets.set(set.id(), set);
         this._defaultOff = null;
         this._subscriptions.set(set, set.subscribe(() => {
             this._defaultOff = null;
-            this._adoptMembers(set);
-            this._apply();
+            // A member that has gone is no longer a choice to remember: added back, it is not chosen again by surprise.
+            const chosen = this._chosen.get(set.id());
+            if (chosen !== undefined && !set.memberIds().includes(chosen)) {
+                this._chosen.delete(set.id());
+            }
+            try {
+                this._adoptMembers(set);
+            }
+            finally {
+                this._apply();
+            }
         }));
         const pending = this._pending.get(set.id());
         if (pending) {
@@ -360,7 +475,12 @@ class RuleSetRegistry {
         if (set.exclusive()) {
             throw new RuleSet_1.RuleSetError(`RuleSet '${id}' is a choice: choose one of its members.`);
         }
-        this._leaves(id).forEach((leaf) => this._values.set(leaf, on));
+        const leaves = this._leaves(id);
+        if (leaves.length === 0) {
+            throw new RuleSet_1.RuleSetError(`RuleSet '${id}' has nothing to switch: it reaches no rule except ` +
+                'through a choice, and a choice is chosen from.');
+        }
+        leaves.forEach((leaf) => this._values.set(leaf, on));
     }
     _choose(id, member) {
         const set = this._requireSet(id);
@@ -375,11 +495,34 @@ class RuleSetRegistry {
     _chosenOf(set) {
         var _a;
         const members = set.memberIds(), chosen = this._chosen.get(set.id());
-        // One that has since been removed is no longer a choice to honour.
         if (chosen !== undefined && members.includes(chosen)) {
             return chosen;
         }
         return (_a = members[0]) !== null && _a !== void 0 ? _a : null;
+    }
+    /**
+     * Where a walk of the whole tree starts: the sets no other holds, then any
+     * set none of those reaches. The second only happens when a set is inside
+     * itself, which `check()` refuses, but until it has, such a set's rules are
+     * still switched, described and saved.
+     */
+    _tops() {
+        const tops = this.roots(), reached = new Set(), reach = (id) => {
+            var _a;
+            if (reached.has(id)) {
+                return;
+            }
+            reached.add(id);
+            (_a = this._sets.get(id)) === null || _a === void 0 ? void 0 : _a.memberIds().forEach(reach);
+        };
+        tops.forEach((top) => reach(top.id()));
+        this._sets.forEach((set) => {
+            if (!reached.has(set.id())) {
+                tops.push(set);
+                reach(set.id());
+            }
+        });
+        return tops;
     }
     /**
      * The rules a plain set switches: those beneath it through plain sets
@@ -437,28 +580,7 @@ class RuleSetRegistry {
                 .forEach((member) => visit(member, active && (!set.exclusive() || member === chosen), path));
             path.delete(id);
         };
-        // From every set and not only the roots: a set inside itself has no root above it, and its rules are still
-        //  switched until `check()` says so. A set reached again from its parent adds nothing a rule's `||` does not
-        //  already hold, except beneath an unchosen alternative, where starting from it as if it were a root would wrongly
-        //  make it active: so only the roots, and whatever no root reaches.
-        const reached = new Set(), reach = (id) => {
-            var _a;
-            if (reached.has(id)) {
-                return;
-            }
-            reached.add(id);
-            (_a = this._sets.get(id)) === null || _a === void 0 ? void 0 : _a.memberIds().forEach(reach);
-        };
-        this.roots().forEach((root) => {
-            visit(root.id(), true, new Set());
-            reach(root.id());
-        });
-        this._sets.forEach((set) => {
-            if (!reached.has(set.id())) {
-                visit(set.id(), true, new Set());
-                reach(set.id());
-            }
-        });
+        this._tops().forEach((top) => visit(top.id(), true, new Set()));
         return effective;
     }
     _apply() {
@@ -470,25 +592,27 @@ class RuleSetRegistry {
             .filter((id) => !this._effective.has(id))
             .forEach((id) => this._switch(id, true));
     }
+    /**
+     * Off: switched off, once, and remembered. On: switched back on only if
+     * this is what switched it off. See the class comment.
+     */
     _switch(id, on) {
-        if (on) {
-            this._switchedOff.delete(id);
-        }
-        else {
-            this._switchedOff.add(id);
-        }
         const rule = this._rules.getById(id);
-        // Not registered yet: `onRegister` switches it when it is.
-        if (rule === null || rule.enabled() === on) {
-            return;
-        }
         if (on) {
-            this._rules.enableById(id);
+            if (this._switchedOff.delete(id) && rule !== null) {
+                this._rules.enableById(id);
+            }
             return;
         }
+        // Not registered yet: `onRegister` switches it when it is.
+        if (rule === null || this._switchedOff.has(id)) {
+            return;
+        }
+        this._switchedOff.add(id);
         this._rules.disableById(id);
     }
 }
 exports.RuleSetRegistry = RuleSetRegistry;
+exports.instance = new RuleSetRegistry(RuleRegistry_1.instance);
 exports.default = RuleSetRegistry;
 //# sourceMappingURL=RuleSetRegistry.js.map

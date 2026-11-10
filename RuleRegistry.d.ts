@@ -3,7 +3,7 @@ import {
   IEntityRegistry,
 } from '@civ-clone/core-registry/EntityRegistry';
 import { IConstructor } from '@civ-clone/core-registry/Registry';
-import Rule from './Rule';
+import { Rule } from './Rule';
 type RuleArgs<T extends Rule> = T extends Rule<infer C, any> ? C : never;
 type RuleReturn<T extends Rule> = T extends Rule<any[], infer R> ? R : never;
 export declare class UnknownRuleError extends Error {}
@@ -31,6 +31,8 @@ export declare class RuleRegistry
   implements IRuleRegistry
 {
   private _cache;
+  private _enabled;
+  private _enabledAt;
   private _byId;
   private _constraints;
   private _listeners;
@@ -73,11 +75,15 @@ export declare class RuleRegistry
   /**
    * The enabled rules of a type, in the order they run.
    *
-   * The cache behind it holds every rule of the type, switched on or not, and
-   * this leaves out the ones that are off as it is asked. It used to cache
-   * only those enabled when it was built, so a rule switched back on with
-   * `rule.enable()` — which no registry hears — stayed out until something
-   * else emptied the cache (civ-clone/web-renderer#158).
+   * The cache behind it holds every rule of the type, switched on or not. It
+   * used to hold only those enabled when it was built, so a rule switched
+   * back on with `rule.enable()` — which no registry hears — stayed out until
+   * something else emptied the cache (civ-clone/web-renderer#158).
+   *
+   * The answer is kept too, and looked at again only when some rule, anywhere,
+   * has been switched since (`switchCount`): one look at each rule of the type,
+   * and nothing allocated unless one of them was. With every rule on, the
+   * answer is the cache itself.
    */
   get<RuleType extends Rule>(ruleType: IConstructor<RuleType>): RuleType[];
   private _ofType;

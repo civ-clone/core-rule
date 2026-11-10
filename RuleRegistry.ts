@@ -3,7 +3,7 @@ import {
   IEntityRegistry,
 } from '@civ-clone/core-registry/EntityRegistry';
 import { IConstructor } from '@civ-clone/core-registry/Registry';
-import Rule from './Rule';
+import { Rule, switchCount } from './Rule';
 
 type RuleArgs<T extends Rule> = T extends Rule<infer C, any> ? C : never;
 type RuleReturn<T extends Rule> = T extends Rule<any[], infer R> ? R : never;
@@ -40,6 +40,8 @@ export class RuleRegistry
   implements IRuleRegistry
 {
   private _cache: RuleCacheMap = new Map();
+  private _enabled: RuleCacheMap = new Map();
+  private _enabledAt: Map<IConstructor<Rule>, number> = new Map();
   private _byId: Map<string, Rule> = new Map();
   private _constraints: Map<Rule, { side: 'after' | 'before'; id: string }> =
     new Map();
@@ -156,14 +158,14 @@ export class RuleRegistry
     this.register(...rules);
   }
 
+  // Neither empties the cache: it holds every rule of a type whether on or off, and `get` notices what has been
+  //  switched for itself.
   disableById(id: string): void {
     this._require(id).disable();
-    this.invalidateCache(this._require(id));
   }
 
   enableById(id: string): void {
     this._require(id).enable();
-    this.invalidateCache(this._require(id));
   }
 
   /** Register `rules` so they run immediately before the named one. */
@@ -185,22 +187,58 @@ export class RuleRegistry
   /**
    * The enabled rules of a type, in the order they run.
    *
-   * The cache behind it holds every rule of the type, switched on or not, and
-   * this leaves out the ones that are off as it is asked. It used to cache
-   * only those enabled when it was built, so a rule switched back on with
-   * `rule.enable()` — which no registry hears — stayed out until something
-   * else emptied the cache (civ-clone/web-renderer#158).
+   * The cache behind it holds every rule of the type, switched on or not. It
+   * used to hold only those enabled when it was built, so a rule switched
+   * back on with `rule.enable()` — which no registry hears — stayed out until
+   * something else emptied the cache (civ-clone/web-renderer#158).
+   *
+   * The answer is kept too, and looked at again only when some rule, anywhere,
+   * has been switched since (`switchCount`): one look at each rule of the type,
+   * and nothing allocated unless one of them was. With every rule on, the
+   * answer is the cache itself.
    */
   get<RuleType extends Rule>(ruleType: IConstructor<RuleType>): RuleType[] {
-    const rules = this._ofType(ruleType);
+    const rules = this._ofType(ruleType),
+      kept = this._enabled.get(ruleType) ?? rules,
+      switches = switchCount();
+
+    if (this._enabledAt.get(ruleType) === switches) {
+      return kept;
+    }
+
+    this._enabledAt.set(ruleType, switches);
+
+    let at = 0,
+      current = true;
 
     for (let index = 0; index < rules.length; index++) {
       if (!rules[index].enabled()) {
-        return rules.filter((rule: RuleType): boolean => rule.enabled());
+        continue;
+      }
+
+      if (kept[at++] !== rules[index]) {
+        current = false;
+
+        break;
       }
     }
 
-    return rules;
+    if (current && at === kept.length) {
+      return kept;
+    }
+
+    const enabled = rules.filter((rule: RuleType): boolean => rule.enabled());
+
+    // All of them on again: the cache itself is the answer, as it was before any was switched.
+    if (enabled.length === rules.length) {
+      this._enabled.delete(ruleType);
+
+      return rules;
+    }
+
+    this._enabled.set(ruleType, enabled);
+
+    return enabled;
   }
 
   private _ofType<RuleType extends Rule>(
@@ -222,11 +260,14 @@ export class RuleRegistry
   }
 
   invalidateCache(rule: Rule | IConstructor<Rule>): void {
-    this._cache.delete(
+    const ruleType =
       rule instanceof Rule
         ? (rule.constructor as IConstructor<Rule>)
-        : (rule as IConstructor<Rule>)
-    );
+        : (rule as IConstructor<Rule>);
+
+    this._cache.delete(ruleType);
+    this._enabled.delete(ruleType);
+    this._enabledAt.delete(ruleType);
   }
 
   /**
@@ -297,10 +338,26 @@ export class RuleRegistry
 
     rules.forEach((rule: Rule): void => this.invalidateCache(rule));
 
-    if (this._listeners.length > 0) {
-      rules.forEach((rule: Rule): void =>
-        [...this._listeners].forEach((listener) => listener(rule))
-      );
+    if (this._listeners.length === 0) {
+      return;
+    }
+
+    // Every listener hears of every rule, whatever another listener does: the rules are in by now, so one that
+    //  throws must not leave the rest untold. The first error is thrown once all have been.
+    const errors: unknown[] = [];
+
+    rules.forEach((rule: Rule): void =>
+      [...this._listeners].forEach((listener) => {
+        try {
+          listener(rule);
+        } catch (error) {
+          errors.push(error);
+        }
+      })
+    );
+
+    if (errors.length > 0) {
+      throw errors[0];
     }
   }
 

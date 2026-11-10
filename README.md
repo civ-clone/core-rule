@@ -27,6 +27,7 @@ ruleSets.choose('my-plugin:settlers', 'my-plugin:settlers/enhanced');
 ```
 
 - **Sets can hold sets.** Switching a set reaches every rule beneath it; `state(id)` is `'on'`, `'off'` or `'mixed'`, for a three-state checkbox. Switching a set does not reach into a choice beneath it.
+- **It only switches off, and only switches back on what it switched off.** A rule that play has disabled for its own reasons is left as it is.
 - **Sets can be added to.** `set.add(...)`, or `ruleSets.extend(id, ...members)` from a package that does not hold the set, which works whether or not the set has been registered yet.
 - **Order of loading does not matter.** A set can name rules, and sets, that are registered later; a rule that should be off is switched off as it is registered.
 - **`check()`** throws for a rule id nothing registered, an `extend` whose set never arrived, and a set inside itself. Call it once every package is loaded.

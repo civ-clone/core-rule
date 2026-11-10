@@ -1,5 +1,5 @@
 import { RuleRegistry } from './RuleRegistry';
-import { RuleSet, RuleSetError, RuleSetMember } from './RuleSet';
+import { RuleSet, RuleSetEntry, RuleSetError } from './RuleSet';
 export declare class UnknownRuleSetError extends RuleSetError {}
 export declare class DuplicateRuleSetIdError extends RuleSetError {}
 export declare class RuleSetCycleError extends RuleSetError {}
@@ -27,6 +27,12 @@ export type RuleSetDescription = {
    * there keeps its setting, and none of it runs.
    */
   active: boolean;
+  /**
+   * Whether `set(id, …)` has anything to switch: a rule always, a choice
+   * never, and a set when it reaches at least one rule without passing through
+   * a choice. A set that holds only choices is a heading, not a checkbox.
+   */
+  switchable: boolean;
   /** A choice's chosen member. `null` for one with no members. */
   chosen?: string | null;
   members: RuleSetDescription[];
@@ -37,13 +43,15 @@ export interface IRuleSetRegistry {
   choose(id: string, member: string): void;
   chosen(id: string): string | null;
   describe(): RuleSetDescription[];
+  dispose(): void;
   entries(): RuleSet[];
-  extend(id: string, ...members: RuleSetMember[]): void;
+  extend(id: string, ...members: RuleSetEntry[]): void;
   get(id: string): RuleSet | null;
   register(...sets: RuleSet[]): void;
   reset(): void;
   restore(choices: RuleSetChoice[]): RuleSetChoice[];
   roots(): RuleSet[];
+  ruleRegistry(): RuleRegistry;
   set(id: string, on: boolean): void;
   state(id: string): RuleSetState;
   unregister(...sets: RuleSet[]): void;
@@ -63,8 +71,15 @@ export interface IRuleSetRegistry {
  * - `set(id, on)` for a rule, or for a plain set, where it reaches every rule
  *   beneath, through the sets inside it. It stops at a choice: a choice always
  *   has exactly one member on, and switching its parent off does not change
- *   that.
+ *   that. The same goes for a set that starts off: `{ enabled: false }` does
+ *   not reach into a choice inside it.
  * - `choose(id, member)` for a choice.
+ *
+ * **It only switches off, and only switches back on what it switched off.** A
+ * rule the tree says should run is left exactly as it is, so a rule that play
+ * has switched off for its own reasons (`rule.disable()`, as several packages
+ * do for a moment at a time) is not switched back on by a change to some
+ * other set. `state()` is what the sets say, not `rule.enabled()`.
  *
  * **Rules are switched as they arrive.** Packages load in name order, so a set
  * is often registered before the rules it names. The registry listens to the
@@ -72,6 +87,9 @@ export interface IRuleSetRegistry {
  * moment it is registered, and no host has to remember to apply anything.
  * `check()` is for the host to call once every package is in: until then a
  * rule id nothing has registered is not an error, and after it is.
+ *
+ * One registry to a `RuleRegistry`. Two would each switch the same rules;
+ * `dispose()` one before making another for the same rules.
  */
 export declare class RuleSetRegistry implements IRuleSetRegistry {
   private _chosen;
@@ -81,11 +99,19 @@ export declare class RuleSetRegistry implements IRuleSetRegistry {
   private _pending;
   private _rules;
   private _sets;
+  private _stopListening;
   private _subscriptions;
-  /** The rules this has switched off, to switch back on if they leave every set. */
+  /** The rules this has switched off: the only ones it will switch back on. */
   private _switchedOff;
   private _values;
   constructor(rules: RuleRegistry);
+  /** The rules these sets switch. */
+  ruleRegistry(): RuleRegistry;
+  /**
+   * Stops listening to the rules and to its sets, and switches back on what
+   * it had switched off. For a registry that is being replaced.
+   */
+  dispose(): void;
   /** Every set, in the order registered, whether or not another holds it. */
   entries(): RuleSet[];
   get(id: string): RuleSet | null;
@@ -95,9 +121,15 @@ export declare class RuleSetRegistry implements IRuleSetRegistry {
    * A set, and every set given to it as a member, and theirs.
    *
    * Two sets under one id are refused, as two rules under one id are: one of
-   * them could never be switched.
+   * them could never be switched. All of them are looked at before any is
+   * taken in, so a refusal leaves the registry as it was.
    */
   register(...sets: RuleSet[]): void;
+  /**
+   * Taken out, along with the sets given to it as members that nothing else
+   * registered holds, and its id out of every set that held it: an id left
+   * behind would be read as a rule's.
+   */
   unregister(...sets: RuleSet[]): void;
   /**
    * Add members to the set registered as `id`, now or when it arrives.
@@ -106,12 +138,13 @@ export declare class RuleSetRegistry implements IRuleSetRegistry {
    * importing it, and without caring which of the two loads first. `check()`
    * reports a set that never arrived.
    */
-  extend(id: string, ...members: RuleSetMember[]): void;
+  extend(id: string, ...members: RuleSetEntry[]): void;
   /**
    * Switch a rule, or every rule a plain set reaches, on or off.
    *
    * Throws for an id that is neither a registered set nor a rule some set
-   * holds, and for a choice, which is chosen from and not switched.
+   * holds, for a choice, which is chosen from and not switched, and for a set
+   * with nothing to switch (see `RuleSetDescription.switchable`).
    */
   set(id: string, on: boolean): void;
   /** Pick the member of a choice that is on. */
@@ -138,12 +171,12 @@ export declare class RuleSetRegistry implements IRuleSetRegistry {
   restore(choices: RuleSetChoice[]): RuleSetChoice[];
   /** Everything back as the sets declare it. */
   reset(): void;
-  /** The whole tree from `roots()`, for a UI to draw. */
+  /** The whole tree, from the sets no other holds, for a UI to draw. */
   describe(): RuleSetDescription[];
   /**
    * For the host, once every package has loaded: throws for a rule id that
    * nothing registered, a set `extend` was given members for that never
-   * arrived, and a set that is inside itself.
+   * arrived, a set under the id of a rule, and a set that is inside itself.
    *
    * Until then none of those is an error, since the package that settles it
    * may simply not have loaded yet. After it, each is a typo or a missing
@@ -151,6 +184,7 @@ export declare class RuleSetRegistry implements IRuleSetRegistry {
    * running.
    */
   check(): void;
+  private _duplicate;
   private _adopt;
   private _adoptMembers;
   private _requireSet;
@@ -159,6 +193,13 @@ export declare class RuleSetRegistry implements IRuleSetRegistry {
   private _set;
   private _choose;
   private _chosenOf;
+  /**
+   * Where a walk of the whole tree starts: the sets no other holds, then any
+   * set none of those reaches. The second only happens when a set is inside
+   * itself, which `check()` refuses, but until it has, such a set's rules are
+   * still switched, described and saved.
+   */
+  private _tops;
   /**
    * The rules a plain set switches: those beneath it through plain sets
    * only. A choice beneath is not entered.
@@ -170,6 +211,11 @@ export declare class RuleSetRegistry implements IRuleSetRegistry {
   /** Whether each rule in the tree runs: see the class comment. */
   private _evaluate;
   private _apply;
+  /**
+   * Off: switched off, once, and remembered. On: switched back on only if
+   * this is what switched it off. See the class comment.
+   */
   private _switch;
 }
+export declare const instance: RuleSetRegistry;
 export default RuleSetRegistry;

@@ -1,9 +1,13 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.idOf = exports.RuleSet = exports.RuleSetError = void 0;
+const Rule_1 = require("./Rule");
 class RuleSetError extends Error {
 }
 exports.RuleSetError = RuleSetError;
+const isMember = (value) => typeof value === 'string' ||
+    value instanceof RuleSet ||
+    value instanceof Rule_1.default;
 /**
  * A named group of rules that are switched together
  * (civ-clone/web-renderer#158).
@@ -11,7 +15,8 @@ exports.RuleSetError = RuleSetError;
  * **By id, not by instance.** A set says `'civ1-unit:city/build/obsolete/Spearman'`
  * and never holds the `Rule`, so it describes any `Game`'s rules, a save can
  * record what was chosen, and a set may name a rule from a package that has
- * not loaded yet.
+ * not loaded yet. A `Rule` given as a member is taken by its id, and one
+ * without an id is refused: there would be no way to say which rule was meant.
  *
  * **Sets inside sets,** so a parent can be switched as one and can show that
  * its children differ. **Mutable,** so a later plugin can add its rules, or
@@ -32,14 +37,27 @@ class RuleSet {
         this._id = id;
         const options = {}, members = [];
         values.forEach((value) => {
-            if (typeof value === 'string' || value instanceof RuleSet) {
+            if (isMember(value)) {
                 members.push(value);
                 return;
+            }
+            // Anything else has to be the options, and only the options: an object that is neither would otherwise be
+            //  merged in and ignored, and the rule or set it was meant to be would silently not be a member.
+            if (value === null ||
+                typeof value !== 'object' ||
+                Object.getPrototypeOf(value) !== Object.prototype ||
+                Object.keys(value).some((key) => !['enabled', 'exclusive'].includes(key))) {
+                throw new RuleSetError(`RuleSet '${id}': a member is a rule id, a Rule with an id or a ` +
+                    'RuleSet, and the options are `exclusive` and `enabled`.');
             }
             Object.assign(options, value);
         });
         this._exclusive = (_a = options.exclusive) !== null && _a !== void 0 ? _a : false;
         this._enabled = (_b = options.enabled) !== null && _b !== void 0 ? _b : true;
+        if (this._exclusive && options.enabled === false) {
+            throw new RuleSetError(`RuleSet '${id}': a choice always has one member on, so it cannot ` +
+                'start switched off.');
+        }
         this.add(...members);
     }
     id() {
@@ -64,12 +82,21 @@ class RuleSet {
         return this.memberIds().includes((0, exports.idOf)(member));
     }
     /** Added to the end. One already there, by id, is left where it is. */
-    add(...members) {
-        let changed = false;
-        members.forEach((member) => {
+    add(...entries) {
+        // All of them looked at before any is added, so a refusal leaves the set as it was.
+        const members = entries.map((entry) => {
+            if (!isMember(entry)) {
+                throw new RuleSetError(`RuleSet '${this._id}': a member is a rule id, a Rule with an id ` +
+                    'or a RuleSet.');
+            }
+            const member = entry instanceof Rule_1.default ? (0, exports.idOf)(entry) : entry;
             if ((0, exports.idOf)(member) === this._id) {
                 throw new RuleSetError(`RuleSet '${this._id}' cannot be a member of itself.`);
             }
+            return member;
+        });
+        let changed = false;
+        members.forEach((member) => {
             const at = this.memberIds().indexOf((0, exports.idOf)(member));
             if (at === -1) {
                 this._members.push(member);
@@ -87,8 +114,8 @@ class RuleSet {
         }
         return this;
     }
-    remove(...members) {
-        const ids = members.map(exports.idOf), kept = this._members.filter((member) => !ids.includes((0, exports.idOf)(member)));
+    remove(...entries) {
+        const ids = entries.map(exports.idOf), kept = this._members.filter((member) => !ids.includes((0, exports.idOf)(member)));
         if (kept.length !== this._members.length) {
             this._members = kept;
             this.changed();
@@ -107,7 +134,16 @@ class RuleSet {
     }
 }
 exports.RuleSet = RuleSet;
-const idOf = (member) => typeof member === 'string' ? member : member.id();
+const idOf = (member) => {
+    if (typeof member === 'string') {
+        return member;
+    }
+    const id = member.id();
+    if (id === null) {
+        throw new RuleSetError('A rule needs an id to be a member of a RuleSet: sets hold rules by id.');
+    }
+    return id;
+};
 exports.idOf = idOf;
 exports.default = RuleSet;
 //# sourceMappingURL=RuleSet.js.map

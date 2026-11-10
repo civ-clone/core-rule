@@ -15,6 +15,13 @@ export interface IRule<C extends any[] = any[], R = any> {
   validate(...args: C): boolean;
 }
 
+// How many times any rule has been switched on or off. `RuleRegistry` keeps its answer to "which rules of this type are
+//  enabled" and needs to know when to look again; a rule is switched through the rule itself as often as through a
+//  registry, so the rule is the only place that can count.
+let switches = 0;
+
+export const switchCount = (): number => switches;
+
 export class Rule<C extends any[] = any[], R = any> implements IRule<C, R> {
   private _criteria: Criteria<C> | undefined;
   private _enabled: boolean = true;
@@ -90,10 +97,18 @@ export class Rule<C extends any[] = any[], R = any> implements IRule<C, R> {
   }
 
   disable(): void {
+    if (this._enabled) {
+      switches++;
+    }
+
     this._enabled = false;
   }
 
   enable(): void {
+    if (!this._enabled) {
+      switches++;
+    }
+
     this._enabled = true;
   }
 

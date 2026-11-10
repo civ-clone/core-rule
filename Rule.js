@@ -1,10 +1,16 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.Rule = void 0;
+exports.Rule = exports.switchCount = void 0;
 const And_1 = require("./Criteria/And");
 const Criterion_1 = require("./Criterion");
 const Effect_1 = require("./Effect");
 const Priorities_1 = require("./Priorities");
+// How many times any rule has been switched on or off. `RuleRegistry` keeps its answer to "which rules of this type are
+//  enabled" and needs to know when to look again; a rule is switched through the rule itself as often as through a
+//  registry, so the rule is the only place that can count.
+let switches = 0;
+const switchCount = () => switches;
+exports.switchCount = switchCount;
 class Rule {
     /**
      * An optional identifier, as the first argument:
@@ -60,9 +66,15 @@ class Rule {
         }
     }
     disable() {
+        if (this._enabled) {
+            switches++;
+        }
         this._enabled = false;
     }
     enable() {
+        if (!this._enabled) {
+            switches++;
+        }
         this._enabled = true;
     }
     /** The identifier this rule was constructed with, if any. */
