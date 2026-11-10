@@ -11,7 +11,8 @@ A `RuleSet` is a named group of rules, held by id, that a game switches together
 import RuleSet from '@civ-clone/core-rule/RuleSet';
 import RuleSetRegistry from '@civ-clone/core-rule/RuleSetRegistry';
 
-const ruleSets = new RuleSetRegistry(rules);
+// One registry to a RuleRegistry: `of` finds it, or makes it the first time.
+const ruleSets = RuleSetRegistry.of(rules);
 
 ruleSets.register(
   // A plain set: its rules are switched on or off together.
