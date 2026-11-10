@@ -43,6 +43,7 @@ export class RuleRegistry
   private _byId: Map<string, Rule> = new Map();
   private _constraints: Map<Rule, { side: 'after' | 'before'; id: string }> =
     new Map();
+  private _listeners: ((rule: Rule) => void)[] = [];
 
   constructor() {
     super(Rule);
@@ -181,18 +182,43 @@ export class RuleRegistry
     this.register(...rules);
   }
 
+  /**
+   * The enabled rules of a type, in the order they run.
+   *
+   * The cache behind it holds every rule of the type, switched on or not, and
+   * this leaves out the ones that are off as it is asked. It used to cache
+   * only those enabled when it was built, so a rule switched back on with
+   * `rule.enable()` — which no registry hears — stayed out until something
+   * else emptied the cache (civ-clone/web-renderer#158).
+   */
   get<RuleType extends Rule>(ruleType: IConstructor<RuleType>): RuleType[] {
-    if (!this._cache.has(ruleType)) {
-      this._cache.set(
-        ruleType,
-        this.filter(
-          (rule: Rule): rule is RuleType =>
-            rule.enabled() && rule instanceof ruleType
-        )
-      );
+    const rules = this._ofType(ruleType);
+
+    for (let index = 0; index < rules.length; index++) {
+      if (!rules[index].enabled()) {
+        return rules.filter((rule: RuleType): boolean => rule.enabled());
+      }
     }
 
-    return this._cache.get(ruleType) || [];
+    return rules;
+  }
+
+  private _ofType<RuleType extends Rule>(
+    ruleType: IConstructor<RuleType>
+  ): RuleType[] {
+    const cached = this._cache.get(ruleType);
+
+    if (cached) {
+      return cached;
+    }
+
+    const rules = this.filter(
+      (rule: Rule): boolean => rule instanceof ruleType
+    ) as RuleType[];
+
+    this._cache.set(ruleType, rules);
+
+    return rules;
   }
 
   invalidateCache(rule: Rule | IConstructor<Rule>): void {
@@ -216,12 +242,16 @@ export class RuleRegistry
    * what `filter().map()` did and is not an incidental detail: a rule's effect
    * can change what a later rule's criteria look at, so interleaving the two
    * passes would be a behavioural change and not an optimisation.
+   *
+   * It walks every rule of the type and not only the enabled ones: `validate`
+   * answers `false` for a rule that is off, so none is processed, and the
+   * loop does not pay for `get`'s look at each rule first.
    */
   process<RuleType extends Rule>(
     ruleType: IConstructor<RuleType>,
     ...args: RuleArgs<RuleType>
   ): RuleReturn<RuleType>[] {
-    const rules = this.get(ruleType),
+    const rules = this._ofType(ruleType),
       matched: RuleType[] = [];
 
     for (let index = 0; index < rules.length; index++) {
@@ -266,6 +296,28 @@ export class RuleRegistry
     super.register(...rules);
 
     rules.forEach((rule: Rule): void => this.invalidateCache(rule));
+
+    if (this._listeners.length > 0) {
+      rules.forEach((rule: Rule): void =>
+        [...this._listeners].forEach((listener) => listener(rule))
+      );
+    }
+  }
+
+  /**
+   * Told of each rule as it is registered, after it is in. Returns how to stop
+   * listening.
+   *
+   * For `RuleSetRegistry`, which has to switch off a rule that a set says
+   * starts off whenever that rule arrives: packages load in name order, so a
+   * set is often registered before the rules it names.
+   */
+  onRegister(listener: (rule: Rule) => void): () => void {
+    this._listeners.push(listener);
+
+    return (): void => {
+      this._listeners = this._listeners.filter((other) => other !== listener);
+    };
   }
 
   unregister(...rules: Rule[]): void {
