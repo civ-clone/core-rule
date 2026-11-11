@@ -3,7 +3,53 @@ import { RuleSet, RuleSetEntry, RuleSetError } from './RuleSet';
 export declare class UnknownRuleSetError extends RuleSetError {}
 export declare class DuplicateRuleSetIdError extends RuleSetError {}
 export declare class RuleSetCycleError extends RuleSetError {}
+export declare class RuleSetConflictError extends RuleSetError {}
+export declare class RuleSetOptionConflictError extends RuleSetError {}
+export declare class RuleSetNoDefaultError extends RuleSetError {}
 export type RuleSetState = 'on' | 'off' | 'mixed';
+/**
+ * What can be wrong with a game's sets (see `validate()`). These stop a game
+ * starting (`blocking`):
+ *
+ * - `conflict`: two sets in force, something of each of which runs,
+ *   supersede the same registered rule, neither supersedes the other, and
+ *   neither is beneath the other: only one of them can be in force. How the
+ *   player settles it is the host's to say.
+ * - `cycle`: a set inside itself, or superseding itself through others.
+ * - `duplicate-id`: a set's id is also a rule's.
+ * - `option-conflict`: two declarations of a set state an option differently.
+ *   Until it is settled, the first stated stands.
+ * - `no-default`: a choice whose members come from more than one declaration,
+ *   or call to `extend`, none of which states its `default`, so its default
+ *   would depend on the order the packages load in.
+ *
+ * These are only shown, since the id may simply belong to a package that is
+ * not loaded: what it names is left out, and switched as usual if it arrives.
+ *
+ * - `unknown-member`: a set names an id that is neither a rule nor a set, or
+ *   a choice's `default` is none of its members.
+ * - `unknown-superseded`: a set supersedes an id that is neither.
+ */
+export type RuleSetProblemKind =
+  | 'conflict'
+  | 'cycle'
+  | 'duplicate-id'
+  | 'option-conflict'
+  | 'no-default'
+  | 'unknown-member'
+  | 'unknown-superseded';
+/**
+ * One problem, as data for a UI to show. `ids` are the sets and rules
+ * involved, the set first where there is one; `message` says it for a person;
+ * `blocking` is whether a game may start while it stands, the same for every
+ * host.
+ */
+export type RuleSetProblem = {
+  kind: RuleSetProblemKind;
+  ids: string[];
+  message: string;
+  blocking: boolean;
+};
 /**
  * One thing chosen: a rule or a plain set switched on or off (`boolean`), or
  * the member of a choice that was picked (its id).
@@ -23,10 +69,18 @@ export type RuleSetDescription = {
    */
   state: RuleSetState;
   /**
-   * `false` beneath a member of a choice that is not the one chosen: what is
-   * there keeps its setting, and none of it runs.
+   * Whether this node is live: `false` beneath a member of a choice that is
+   * not the one chosen, and for what is superseded itself. A superseded set
+   * does not make what is beneath it inactive: a rule there that is not
+   * superseded itself still runs. What is not active keeps its setting. A rule
+   * runs exactly when it is registered, switched on, and at least one of its
+   * nodes is active.
    */
   active: boolean;
+  /** A set or choice: the ids it supersedes, as it declares them. */
+  supersedes?: string[];
+  /** Superseded just now: the sets in force that supersede it. */
+  supersededBy?: string[];
   /**
    * Whether `set(id, …)` has anything to switch: a rule always, a choice
    * never, and a set when it reaches at least one rule without passing through
@@ -42,6 +96,7 @@ export interface IRuleSetRegistry {
   choices(): RuleSetChoice[];
   choose(id: string, member: string): void;
   chosen(id: string): string | null;
+  declarations(id: string): RuleSet[];
   describe(): RuleSetDescription[];
   dispose(): void;
   entries(): RuleSet[];
@@ -55,6 +110,7 @@ export interface IRuleSetRegistry {
   set(id: string, on: boolean): void;
   state(id: string): RuleSetState;
   unregister(...sets: RuleSet[]): void;
+  validate(): RuleSetProblem[];
 }
 /**
  * The rule sets of a game, what has been chosen in them, and the switching of
@@ -65,6 +121,21 @@ export interface IRuleSetRegistry {
  * active unless it passes through a member of a choice that is not the chosen
  * one. So a rule shared by two alternatives runs whichever is chosen, and
  * choosing an alternative back gives its rules the settings they had.
+ *
+ * **Unless it is superseded** (civ-clone/web-renderer#954). A set that
+ * `supersedes` rules or sets is in force when some path to it is active and
+ * at least one registered rule beneath it, through the chosen members of any
+ * choice, is switched on (a replacement that has not loaded replaces
+ * nothing); and while it is, nothing it supersedes runs, except what the set
+ * itself holds through a live path (through the chosen member of any choice
+ * beneath it). A set it names means every rule beneath that set,
+ * choices and all, and it carries through: a set in force also supersedes
+ * what the sets it names supersede, and so on, however those sets are
+ * switched. What is superseded keeps its setting, as
+ * what is beneath an alternative not chosen does, and none of it is saved:
+ * it is worked out from the sets, like the rest. Whether a set is in force
+ * goes by the settings alone, never by whether it is itself superseded, so
+ * the answer never depends on itself.
  *
  * **Two kinds of switching, kept apart:**
  *
@@ -86,9 +157,18 @@ export interface IRuleSetRegistry {
  * **Rules are switched as they arrive.** Packages load in name order, so a set
  * is often registered before the rules it names. The registry listens to the
  * `RuleRegistry`, so an alternative that is not the chosen one is off from the
- * moment it is registered, and no host has to remember to apply anything.
- * `check()` is for the host to call once every package is in: until then a
- * rule id nothing has registered is not an error, and after it is.
+ * moment it is registered, and no host has to remember to apply anything. A
+ * replacement rule that arrives puts its superseding set in force then; but
+ * the `RuleRegistry` says nothing when a rule is unregistered, so one that is
+ * taken out leaves its set in force until the sets are next applied (by any
+ * `set`, `choose`, `register` and the like).
+ * `validate()` and `check()` are for the host once every package is in.
+ *
+ * **A set belongs to no package** (civ-clone/web-renderer#954). Any package
+ * may declare a set under an id, and every declaration of an id is one set:
+ * their members together, in the order they arrived, and their options where
+ * they state them (see `validate()` for when they disagree). Each declaration
+ * is left as its package made it.
  *
  * **One registry to a `RuleRegistry`,** found with `RuleSetRegistry.of(rules)`,
  * which makes it the first time. Two would each switch the same rules, and
@@ -99,11 +179,21 @@ export interface IRuleSetRegistry {
  * no sets, it switches nothing.)
  */
 export declare class RuleSetRegistry implements IRuleSetRegistry {
+  /** Each rule id, and the superseding sets that hold it through a live path: worked out again after each apply. */
+  private _holdersOf;
+  /** The superseding sets in force as last worked out. */
+  private _inForceNow;
+  /** The sets active by path as last worked out, while any set supersedes anything. */
+  private _activeNow;
+  private _cache;
   private _chosen;
   /** The rules that start off, worked out when first asked after the tree changes. */
   private _defaultOff;
   private _effective;
-  private _pending;
+  /** This registry's own declaration of each set `extend` was given members for. */
+  private _extensions;
+  /** The members each call to `extend` gave each set, by id. */
+  private _extended;
   private _rules;
   private _sets;
   private _stopListening;
@@ -131,37 +221,51 @@ export declare class RuleSetRegistry implements IRuleSetRegistry {
    * that is being replaced.
    */
   dispose(): void;
-  /** Every set, in the order registered, whether or not another holds it. */
+  /**
+   * Every set, in the order its id was first registered, whether or not
+   * another holds it. Each is as `get` gives it.
+   */
   entries(): RuleSet[];
+  /**
+   * The set registered as `id`: its declaration, when there is one, or else a
+   * `RuleSet` that says what all of them say together. That one is the same
+   * object until anything about the set changes, and throws if `add` or
+   * `remove` is called on it: add with `extend`, or through a declaration.
+   * Nor does a listener `subscribe`d to it hear of later changes: subscribe to
+   * a declaration. `declarations(id)` gives each.
+   *
+   * Within a declaration's own listener, the registry may not have caught up
+   * with the change yet: it hears of it as one listener among the others.
+   */
   get(id: string): RuleSet | null;
+  /** Each declaration of the set `id`, in the order registered. */
+  declarations(id: string): RuleSet[];
   /** The sets no other set holds: where a UI starts drawing. */
   roots(): RuleSet[];
   /**
    * A set, and every set given to it as a member, and theirs.
    *
-   * Two sets under one id are refused, as two rules under one id are: one of
-   * them could never be switched. All of them are looked at before any is
-   * taken in, so a refusal leaves the registry as it was.
+   * One under an id that is registered already is another declaration of
+   * that set, and joins it: see the class comment.
    */
   register(...sets: RuleSet[]): void;
   /**
-   * Taken out, along with the sets given to it as members that nothing else
-   * registered holds.
+   * Taken out, each declaration given, along with the sets given to it as
+   * members that nothing else registered holds. The set lasts while any
+   * declaration of its id does.
    *
    * No other set is changed: sets are their package's own objects, and may be
    * in another game's registry too. A set that names this one by id keeps the
-   * id, which `check()` then reports unless a set is registered under it
+   * id, which `validate()` then reports unless a set is registered under it
    * again, as when one is swapped for another. A registered set that was
    * *given* this one holds the set itself, and would put it straight back, so
    * that is refused: take it out of there first.
    */
   unregister(...sets: RuleSet[]): void;
   /**
-   * Add members to the set registered as `id`, now or when it arrives.
-   *
-   * This is how a plugin adds its rules to another package's set without
-   * importing it, and without caring which of the two loads first. `check()`
-   * reports a set that never arrived.
+   * Add members to the set `id`: shorthand for declaring the set with them and
+   * no options, so the set is there from now on, whether or not another
+   * package declares it too, and whichever loads first.
    */
   extend(id: string, ...members: RuleSetEntry[]): void;
   /**
@@ -176,7 +280,7 @@ export declare class RuleSetRegistry implements IRuleSetRegistry {
   choose(id: string, member: string): void;
   /** A rule's setting, or a set's from the rules it switches. */
   state(id: string): RuleSetState;
-  /** The member of a choice that is on: the one picked, or else the first. */
+  /** The member of a choice that is on: the one picked, or else its default. */
   chosen(id: string): string | null;
   /**
    * How the tree differs from its defaults, as the shortest list that says
@@ -198,26 +302,38 @@ export declare class RuleSetRegistry implements IRuleSetRegistry {
   reset(): void;
   /** The whole tree, from the sets no other holds, for a UI to draw. */
   describe(): RuleSetDescription[];
+  private _describe;
   /**
-   * For the host, once every package has loaded: throws for a rule id that
-   * nothing registered, a set `extend` was given members for that never
-   * arrived, a set under the id of a rule, and a set that is inside itself.
-   *
-   * Until then none of those is an error, since the package that settles it
-   * may simply not have loaded yet. After it, each is a typo or a missing
-   * package, and should stop the game starting and not quietly leave a rule
-   * running.
+   * For the host, once every package has loaded: throws for the first of the
+   * problems `validate()` finds that stops a game starting, for a host with
+   * nobody to show them to. One that is only shown does not throw.
    */
   check(): void;
-  private _duplicate;
+  /**
+   * Every problem with the sets as they stand, as data, for a setup window to
+   * show before a game starts: see `RuleSetProblemKind`. Empty when there are
+   * none.
+   *
+   * The orphans (`unknown-*`) only mean anything once every package has
+   * loaded, and even then are only shown. A `conflict` is the player's to
+   * settle, and goes as soon as only one of the two sets is in force.
+   */
+  validate(): RuleSetProblem[];
+  private _validate;
+  /** A merged set is no declaration: registering it, or taking it out, would mean nothing. */
+  private _refuseView;
   private _adopt;
   private _adoptMembers;
+  /** A member that has gone is no longer a choice to remember: added back, it is not chosen again by surprise. */
+  private _forgetChosen;
   private _requireSet;
   /** Throws unless some registered set holds `id` as a rule. */
   private _requireMember;
   private _set;
   private _choose;
   private _chosenOf;
+  /** The sets no other set holds. */
+  private _roots;
   /**
    * Where a walk of the whole tree starts: the sets no other holds, then any
    * set none of those reaches. The second only happens when a set is inside
@@ -235,6 +351,44 @@ export declare class RuleSetRegistry implements IRuleSetRegistry {
   private _default;
   /** Whether each rule in the tree runs: see the class comment. */
   private _evaluate;
+  /**
+   * Every rule, and every set, beneath `id`, through every member of a choice
+   * and not only the chosen one: what superseding it means.
+   */
+  private _beneath;
+  /**
+   * Every rule, and every set, beneath `id` through live paths only: through
+   * the chosen member of any choice, as whether a set is in force is worked
+   * out. What a set exempts from its own superseding.
+   */
+  private _live;
+  /**
+   * `work`, with what `_beneath` and `_reach` find kept until it is done:
+   * nothing changes the tree meanwhile, and a long chain of sets superseding
+   * one another would otherwise be walked again for each.
+   */
+  private _cached;
+  /**
+   * What a set supersedes, carried through: what it names, everything beneath
+   * those, and what every set among them supersedes in turn, however those
+   * sets are switched; except what the set itself holds through a live path
+   * (see `_live`). So a set can take the place of the whole of another while
+   * keeping one of its rules, by holding that rule too; and a rule it holds as
+   * an alternative not chosen is superseded with the rest, when it is beneath
+   * something else the set names.
+   */
+  private _reach;
+  /**
+   * The sets that supersede something and are in force, in the order
+   * registered: some path to the set is active, and at least one registered
+   * rule beneath it, through the chosen member of any choice, is switched on.
+   * By the settings alone: see the class comment.
+   */
+  private _inForce;
+  /** Each rule id, and the superseding sets that hold it through a live path. */
+  private _holders;
+  /** What is superseded just now, rules and sets, each by the sets in force that supersede it. */
+  private _supersession;
   private _apply;
   /**
    * Off: switched off if it is on, and remembered as this registry's doing.
