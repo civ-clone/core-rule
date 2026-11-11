@@ -26,15 +26,16 @@ export type RuleSetState = 'on' | 'off' | 'mixed';
  * What can be wrong with a game's sets (see `validate()`). These stop a game
  * starting (`blocking`):
  *
- * - `conflict`: two sets in force supersede the same rule, and neither
- *   supersedes the other. One has to be switched off.
+ * - `conflict`: two sets in force, something of each of which runs,
+ *   supersede the same registered rule, and neither supersedes the other. One
+ *   has to be switched off.
  * - `cycle`: a set inside itself, or superseding itself through others.
  * - `duplicate-id`: a set's id is also a rule's.
  * - `option-conflict`: two declarations of a set state an option differently.
  *   Until it is settled, the first stated stands.
  * - `no-default`: a choice whose members come from more than one declaration,
- *   none of which states its `default`, so its default would depend on the
- *   order the packages load in.
+ *   or call to `extend`, none of which states its `default`, so its default
+ *   would depend on the order the packages load in.
  *
  * These are only shown, since the id may simply belong to a package that is
  * not loaded: what it names is left out, and switched as usual if it arrives.
@@ -135,6 +136,45 @@ export interface IRuleSetRegistry {
 }
 
 /**
+ * What `get` gives for a set with more than one declaration: a `RuleSet` for
+ * reading, which refuses to be changed. A change to it would reach no
+ * declaration, and so would be lost without a word: add to the set with
+ * `RuleSetRegistry.extend`, or through a declaration of it.
+ */
+class MergedRuleSetView extends RuleSet {
+  // Unset while `RuleSet`'s constructor adds the members, so that it can.
+  private _sealed: boolean = false;
+
+  constructor(id: string, ...values: (RuleSetOptions | RuleSetEntry)[]) {
+    super(id, ...values);
+
+    this._sealed = true;
+  }
+
+  add(...entries: RuleSetEntry[]): this {
+    this._refuse();
+
+    return super.add(...entries);
+  }
+
+  remove(...entries: RuleSetEntry[]): this {
+    this._refuse();
+
+    return super.remove(...entries);
+  }
+
+  private _refuse(): void {
+    if (this._sealed) {
+      throw new RuleSetError(
+        `RuleSet '${this.id()}' is declared in more than one place, and this ` +
+          'is all of them together, which cannot be changed: use ' +
+          '`RuleSetRegistry.extend`, or one of its declarations.'
+      );
+    }
+  }
+}
+
+/**
  * A set as the registry sees it: every declaration of its id taken together,
  * in the order they arrived (civ-clone/web-renderer#954). Worked out from them
  * each time it is asked, so a declaration that changes is seen at once, and
@@ -144,6 +184,8 @@ export interface IRuleSetRegistry {
 class MergedRuleSet {
   private _declarations: RuleSet[] = [];
   private _id: string;
+  /** What `toRuleSet` gave, until anything about the set changes. */
+  private _view: RuleSet | null = null;
 
   constructor(id: string) {
     this._id = id;
@@ -163,12 +205,19 @@ class MergedRuleSet {
 
   add(declaration: RuleSet): void {
     this._declarations.push(declaration);
+    this.changed();
   }
 
   remove(declaration: RuleSet): void {
     this._declarations = this._declarations.filter(
       (other) => other !== declaration
     );
+    this.changed();
+  }
+
+  /** A declaration of it has changed. */
+  changed(): void {
+    this._view = null;
   }
 
   /** Each declaration's in turn, a repeat left out: a set given as itself takes the place of its id, as in `add`. */
@@ -247,12 +296,16 @@ class MergedRuleSet {
 
   /**
    * The set as one `RuleSet`: the declaration itself when there is only one,
-   * and otherwise a new one made to say what they say together, which changes
-   * nothing if it is changed.
+   * and otherwise one made to say what they say together, the same one until
+   * the set changes, and which refuses to be changed itself.
    */
   toRuleSet(): RuleSet {
     if (this._declarations.length === 1) {
       return this._declarations[0];
+    }
+
+    if (this._view !== null) {
+      return this._view;
     }
 
     const stated = this.stated('default'),
@@ -270,7 +323,9 @@ class MergedRuleSet {
       options.supersedes = supersedes;
     }
 
-    return new RuleSet(this._id, options, ...this.members());
+    this._view = new MergedRuleSetView(this._id, options, ...this.members());
+
+    return this._view;
   }
 }
 
@@ -286,11 +341,13 @@ class MergedRuleSet {
  *
  * **Unless it is superseded** (civ-clone/web-renderer#954). A set that
  * `supersedes` rules or sets is in force when some path to it is active and
- * at least one rule beneath it, through the chosen members of any choice, is
- * switched on; and while it is, nothing it supersedes runs. A set it names
- * means every rule beneath that set, choices and all, and it carries through:
- * a set in force also supersedes what the sets it names supersede, and so on,
- * however those sets are switched. What is superseded keeps its setting, as
+ * at least one registered rule beneath it, through the chosen members of any
+ * choice, is switched on (a replacement that has not loaded replaces
+ * nothing); and while it is, nothing it supersedes runs, except what is
+ * beneath the set itself. A set it names means every rule beneath that set,
+ * choices and all, and it carries through: a set in force also supersedes
+ * what the sets it names supersede, and so on, however those sets are
+ * switched. What is superseded keeps its setting, as
  * what is beneath an alternative not chosen does, and none of it is saved:
  * it is worked out from the sets, like the rest. Whether a set is in force
  * goes by the settings alone, never by whether it is itself superseded, so
@@ -334,12 +391,18 @@ class MergedRuleSet {
  * no sets, it switches nothing.)
  */
 export class RuleSetRegistry implements IRuleSetRegistry {
+  private _cache: {
+    beneath: Map<string, { rules: Set<string>; sets: Set<string> }>;
+    reach: Map<string, { rules: Set<string>; sets: Set<string> }>;
+  } | null = null;
   private _chosen: Map<string, string> = new Map();
   /** The rules that start off, worked out when first asked after the tree changes. */
   private _defaultOff: Set<string> | null = null;
   private _effective: Map<string, boolean> = new Map();
   /** This registry's own declaration of each set `extend` was given members for. */
   private _extensions: Map<string, RuleSet> = new Map();
+  /** How many calls to `extend` gave each set members. */
+  private _extended: Map<string, number> = new Map();
   private _rules: RuleRegistry;
   private _sets: Map<string, MergedRuleSet> = new Map();
   private _stopListening: () => void;
@@ -381,6 +444,19 @@ export class RuleSetRegistry implements IRuleSetRegistry {
         return;
       }
 
+      // A rule beneath a set that supersedes can put that set in force, and so switch off other rules: a replacement
+      //  counts only once it is there.
+      if (
+        [...this._sets.values()].some(
+          (set) =>
+            set.supersedes().length > 0 && this._beneath(set.id()).rules.has(id)
+        )
+      ) {
+        this._apply();
+
+        return;
+      }
+
       // Off if the sets say so; and back on if this is a rule that was switched off and has since left every set, or
       //  was unregistered while its set was switched back on.
       this._switch(id, this._effective.get(id) ?? true);
@@ -407,6 +483,7 @@ export class RuleSetRegistry implements IRuleSetRegistry {
     this._subscriptions.clear();
     this._sets.clear();
     this._extensions.clear();
+    this._extended.clear();
     this._values.clear();
     this._setAt.clear();
     this._chosen.clear();
@@ -509,6 +586,7 @@ export class RuleSetRegistry implements IRuleSetRegistry {
 
         if (this._extensions.get(set.id()) === set) {
           this._extensions.delete(set.id());
+          this._extended.delete(set.id());
         }
 
         if (merged.declarations().length === 0) {
@@ -527,10 +605,25 @@ export class RuleSetRegistry implements IRuleSetRegistry {
 
     sets.forEach(drop);
 
+    // An orphan stays while a registered declaration holds that very object, or names its id with nothing else to
+    //  answer to it: another declaration of the id answers for itself.
     while (orphans.length > 0) {
-      const orphan = orphans.shift()!;
+      const orphan = orphans.shift()!,
+        declarations = [...this._sets.values()].flatMap((set) =>
+          set.declarations()
+        ),
+        alone =
+          (this._sets.get(orphan.id())?.declarations() ?? []).filter(
+            (other) => other !== orphan
+          ).length === 0;
 
-      if (![...this._sets.values()].some((other) => other.has(orphan))) {
+      if (
+        !declarations.some(
+          (other) =>
+            other.members().includes(orphan) ||
+            (alone && other.memberIds().includes(orphan.id()))
+        )
+      ) {
         drop(orphan);
       }
     }
@@ -547,18 +640,22 @@ export class RuleSetRegistry implements IRuleSetRegistry {
   extend(id: string, ...members: RuleSetEntry[]): void {
     const known = this._extensions.get(id);
 
+    // Every call is counted, though all of them share one declaration: each may be a different package's, and a
+    //  choice they add to has a default that depends on which loads first (see `no-default`).
     if (known) {
       // Tells the subscription, which adopts and applies.
       known.add(...members);
+    } else {
+      // Made whole before it is registered: a member that can't be one fails here, where it was given.
+      const declaration = new RuleSet(id, ...members);
 
-      return;
+      this._extensions.set(id, declaration);
+      this.register(declaration);
     }
 
-    // Made whole before it is registered: a member that can't be one fails here, where it was given.
-    const declaration = new RuleSet(id, ...members);
-
-    this._extensions.set(id, declaration);
-    this.register(declaration);
+    if (members.length > 0) {
+      this._extended.set(id, (this._extended.get(id) ?? 0) + 1);
+    }
   }
 
   /**
@@ -750,6 +847,10 @@ export class RuleSetRegistry implements IRuleSetRegistry {
 
   /** The whole tree, from the sets no other holds, for a UI to draw. */
   describe(): RuleSetDescription[] {
+    return this._cached(() => this._describe());
+  }
+
+  private _describe(): RuleSetDescription[] {
     const superseded = this._supersession(),
       // Only said where there is something to say, so a tree with nothing superseded is described as it always was.
       supersession = (
@@ -863,6 +964,10 @@ export class RuleSetRegistry implements IRuleSetRegistry {
    * settle, by switching one of the two sets off, and goes as soon as they do.
    */
   validate(): RuleSetProblem[] {
+    return this._cached(() => this._validate());
+  }
+
+  private _validate(): RuleSetProblem[] {
     const problems: RuleSetProblem[] = [],
       said = new Set<string>(),
       report = (
@@ -961,7 +1066,7 @@ export class RuleSetRegistry implements IRuleSetRegistry {
         report(
           {
             kind: 'cycle',
-            ids: loop,
+            ids: [...new Set(loop)],
             message:
               `Rule set '${set.id()}' supersedes itself: ${loop.join(' → ')}` +
               (through[through.length - 1] === set.id()
@@ -1028,11 +1133,15 @@ export class RuleSetRegistry implements IRuleSetRegistry {
       const stated = set.stated('default');
 
       if (stated === undefined) {
-        if (
+        // Each declaration that brings members, and each call to `extend` that does, which share one declaration.
+        const contributions =
           declarations.filter(
-            (declaration) => declaration.memberIds().length > 0
-          ).length > 1
-        ) {
+            (declaration) =>
+              declaration !== this._extensions.get(set.id()) &&
+              declaration.memberIds().length > 0
+          ).length + (this._extended.get(set.id()) ?? 0);
+
+        if (contributions > 1) {
           report(
             {
               kind: 'no-default',
@@ -1065,22 +1174,30 @@ export class RuleSetRegistry implements IRuleSetRegistry {
       }
     });
 
-    const inForce = this._inForce(),
-      reach = new Map(inForce.map((set) => [set, this._reach(set)]));
+    // Only sets that something of runs, as it is worked out: two sets that a third in force supersedes both of change
+    //  nothing between them, and asking the player to switch one off would be asking for nothing.
+    const effective = this._evaluate(),
+      runs = (set: MergedRuleSet): boolean =>
+        [...this._beneath(set.id()).rules].some(
+          (rule) =>
+            effective.get(rule) === true && this._rules.getById(rule) !== null
+        ),
+      inForce = this._inForce().filter(runs);
 
     inForce.forEach((first, index) =>
       inForce.slice(index + 1).forEach((second) => {
-        const firstReach = reach.get(first)!,
-          secondReach = reach.get(second)!,
-          shared = [...firstReach.rules].filter((rule) =>
-            secondReach.rules.has(rule)
+        const firstReach = this._reach(first),
+          secondReach = this._reach(second),
+          // A rule nothing registered is an orphan, not a conflict: if it arrives, both its replacements are in force.
+          shared = [...firstReach.rules].filter(
+            (rule) =>
+              secondReach.rules.has(rule) && this._rules.getById(rule) !== null
           );
 
         if (
           shared.length === 0 ||
           firstReach.sets.has(second.id()) ||
-          secondReach.sets.has(first.id()) ||
-          this._apart(first.id(), second.id())
+          secondReach.sets.has(first.id())
         ) {
           return;
         }
@@ -1122,6 +1239,7 @@ export class RuleSetRegistry implements IRuleSetRegistry {
         const current = this._sets.get(set.id());
 
         if (current) {
+          current.changed();
           this._forgetChosen(current);
         }
 
@@ -1409,6 +1527,12 @@ export class RuleSetRegistry implements IRuleSetRegistry {
    * and not only the chosen one: what superseding it means.
    */
   private _beneath(id: string): { rules: Set<string>; sets: Set<string> } {
+    const cached = this._cache?.beneath.get(id);
+
+    if (cached) {
+      return cached;
+    }
+
     const rules = new Set<string>(),
       sets = new Set<string>(),
       visit = (member: string): void => {
@@ -1430,19 +1554,51 @@ export class RuleSetRegistry implements IRuleSetRegistry {
 
     visit(id);
 
-    return { rules, sets };
+    const beneath = { rules, sets };
+
+    this._cache?.beneath.set(id, beneath);
+
+    return beneath;
+  }
+
+  /**
+   * `work`, with what `_beneath` and `_reach` find kept until it is done:
+   * nothing changes the tree meanwhile, and a long chain of sets superseding
+   * one another would otherwise be walked again for each.
+   */
+  private _cached<T>(work: () => T): T {
+    if (this._cache !== null) {
+      return work();
+    }
+
+    this._cache = { beneath: new Map(), reach: new Map() };
+
+    try {
+      return work();
+    } finally {
+      this._cache = null;
+    }
   }
 
   /**
    * What a set supersedes, carried through: what it names, everything beneath
    * those, and what every set among them supersedes in turn, however those
-   * sets are switched.
+   * sets are switched; except what is beneath the set itself. So a set can
+   * take the place of the whole of another while keeping one of its rules, by
+   * holding that rule too.
    */
   private _reach(set: MergedRuleSet): {
     rules: Set<string>;
     sets: Set<string>;
   } {
-    const rules = new Set<string>(),
+    const cached = this._cache?.reach.get(set.id());
+
+    if (cached) {
+      return cached;
+    }
+
+    const own = this._beneath(set.id()),
+      rules = new Set<string>(),
       sets = new Set<string>(),
       named = new Set<string>(),
       queue = set.supersedes();
@@ -1465,7 +1621,14 @@ export class RuleSetRegistry implements IRuleSetRegistry {
       });
     }
 
-    return { rules, sets };
+    own.rules.forEach((rule) => rules.delete(rule));
+    own.sets.forEach((other) => sets.delete(other));
+
+    const reach = { rules, sets };
+
+    this._cache?.reach.set(set.id(), reach);
+
+    return reach;
   }
 
   /**
@@ -1516,9 +1679,9 @@ export class RuleSetRegistry implements IRuleSetRegistry {
 
   /**
    * The sets that supersede something and are in force, in the order
-   * registered: some path to the set is active, and at least one rule beneath
-   * it, through the chosen member of any choice, is switched on. By the
-   * settings alone: see the class comment.
+   * registered: some path to the set is active, and at least one registered
+   * rule beneath it, through the chosen member of any choice, is switched on.
+   * By the settings alone: see the class comment.
    */
   private _inForce(): MergedRuleSet[] {
     const superseding = [...this._sets.values()].filter(
@@ -1550,8 +1713,9 @@ export class RuleSetRegistry implements IRuleSetRegistry {
       switchedOn = (id: string, path: Set<string>): boolean => {
         const set = this._sets.get(id);
 
+        // A rule that is not there yet replaces nothing: until it is, what it would replace runs.
         if (!set) {
-          return this._value(id);
+          return this._value(id) && this._rules.getById(id) !== null;
         }
 
         if (path.has(id)) {
@@ -1593,31 +1757,9 @@ export class RuleSetRegistry implements IRuleSetRegistry {
     return superseded;
   }
 
-  /**
-   * Whether two sets are beneath different members of one choice, and so
-   * alternatives already: only one of them can be chosen.
-   */
-  private _apart(first: string, second: string): boolean {
-    return [...this._sets.values()].some((set) => {
-      if (!set.exclusive()) {
-        return false;
-      }
-
-      const beneath = set.memberIds().map((member) => this._beneath(member)),
-        holdsFirst = beneath.filter((below) => below.sets.has(first)),
-        holdsSecond = beneath.filter((below) => below.sets.has(second));
-
-      return (
-        holdsFirst.length > 0 &&
-        holdsSecond.length > 0 &&
-        !holdsFirst.some((below) => holdsSecond.includes(below))
-      );
-    });
-  }
-
   private _apply(): void {
     this._defaultOff = null;
-    this._effective = this._evaluate();
+    this._effective = this._cached(() => this._evaluate());
 
     this._effective.forEach((on, id) => this._switch(id, on));
 

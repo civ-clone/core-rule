@@ -11,15 +11,16 @@ export type RuleSetState = 'on' | 'off' | 'mixed';
  * What can be wrong with a game's sets (see `validate()`). These stop a game
  * starting (`blocking`):
  *
- * - `conflict`: two sets in force supersede the same rule, and neither
- *   supersedes the other. One has to be switched off.
+ * - `conflict`: two sets in force, something of each of which runs,
+ *   supersede the same registered rule, and neither supersedes the other. One
+ *   has to be switched off.
  * - `cycle`: a set inside itself, or superseding itself through others.
  * - `duplicate-id`: a set's id is also a rule's.
  * - `option-conflict`: two declarations of a set state an option differently.
  *   Until it is settled, the first stated stands.
  * - `no-default`: a choice whose members come from more than one declaration,
- *   none of which states its `default`, so its default would depend on the
- *   order the packages load in.
+ *   or call to `extend`, none of which states its `default`, so its default
+ *   would depend on the order the packages load in.
  *
  * These are only shown, since the id may simply belong to a package that is
  * not loaded: what it names is left out, and switched as usual if it arrives.
@@ -119,11 +120,13 @@ export interface IRuleSetRegistry {
  *
  * **Unless it is superseded** (civ-clone/web-renderer#954). A set that
  * `supersedes` rules or sets is in force when some path to it is active and
- * at least one rule beneath it, through the chosen members of any choice, is
- * switched on; and while it is, nothing it supersedes runs. A set it names
- * means every rule beneath that set, choices and all, and it carries through:
- * a set in force also supersedes what the sets it names supersede, and so on,
- * however those sets are switched. What is superseded keeps its setting, as
+ * at least one registered rule beneath it, through the chosen members of any
+ * choice, is switched on (a replacement that has not loaded replaces
+ * nothing); and while it is, nothing it supersedes runs, except what is
+ * beneath the set itself. A set it names means every rule beneath that set,
+ * choices and all, and it carries through: a set in force also supersedes
+ * what the sets it names supersede, and so on, however those sets are
+ * switched. What is superseded keeps its setting, as
  * what is beneath an alternative not chosen does, and none of it is saved:
  * it is worked out from the sets, like the rest. Whether a set is in force
  * goes by the settings alone, never by whether it is itself superseded, so
@@ -167,12 +170,15 @@ export interface IRuleSetRegistry {
  * no sets, it switches nothing.)
  */
 export declare class RuleSetRegistry implements IRuleSetRegistry {
+  private _cache;
   private _chosen;
   /** The rules that start off, worked out when first asked after the tree changes. */
   private _defaultOff;
   private _effective;
   /** This registry's own declaration of each set `extend` was given members for. */
   private _extensions;
+  /** How many calls to `extend` gave each set members. */
+  private _extended;
   private _rules;
   private _sets;
   private _stopListening;
@@ -275,6 +281,7 @@ export declare class RuleSetRegistry implements IRuleSetRegistry {
   reset(): void;
   /** The whole tree, from the sets no other holds, for a UI to draw. */
   describe(): RuleSetDescription[];
+  private _describe;
   /**
    * For the host, once every package has loaded: throws for the first of the
    * problems `validate()` finds that stops a game starting, for a host with
@@ -291,6 +298,7 @@ export declare class RuleSetRegistry implements IRuleSetRegistry {
    * settle, by switching one of the two sets off, and goes as soon as they do.
    */
   validate(): RuleSetProblem[];
+  private _validate;
   private _adopt;
   private _adoptMembers;
   /** A member that has gone is no longer a choice to remember: added back, it is not chosen again by surprise. */
@@ -326,9 +334,17 @@ export declare class RuleSetRegistry implements IRuleSetRegistry {
    */
   private _beneath;
   /**
+   * `work`, with what `_beneath` and `_reach` find kept until it is done:
+   * nothing changes the tree meanwhile, and a long chain of sets superseding
+   * one another would otherwise be walked again for each.
+   */
+  private _cached;
+  /**
    * What a set supersedes, carried through: what it names, everything beneath
    * those, and what every set among them supersedes in turn, however those
-   * sets are switched.
+   * sets are switched; except what is beneath the set itself. So a set can
+   * take the place of the whole of another while keeping one of its rules, by
+   * holding that rule too.
    */
   private _reach;
   /**
@@ -339,18 +355,13 @@ export declare class RuleSetRegistry implements IRuleSetRegistry {
   private _supersedesItself;
   /**
    * The sets that supersede something and are in force, in the order
-   * registered: some path to the set is active, and at least one rule beneath
-   * it, through the chosen member of any choice, is switched on. By the
-   * settings alone: see the class comment.
+   * registered: some path to the set is active, and at least one registered
+   * rule beneath it, through the chosen member of any choice, is switched on.
+   * By the settings alone: see the class comment.
    */
   private _inForce;
   /** What is superseded just now, rules and sets, each by the sets in force that supersede it. */
   private _supersession;
-  /**
-   * Whether two sets are beneath different members of one choice, and so
-   * alternatives already: only one of them can be chosen.
-   */
-  private _apart;
   private _apply;
   /**
    * Off: switched off if it is on, and remembered as this registry's doing.

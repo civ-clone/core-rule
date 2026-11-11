@@ -422,21 +422,38 @@ describe('RuleSetRegistry conflicts', (): void => {
     expect(ran()).to.eql(['c', 'd', 'e', 'f']);
   });
 
-  it('should not report two sets beneath different members of one choice', (): void => {
+  it('should not report two sets beneath different members of one choice, as only one can be in force', (): void => {
     const { sets } = setUp();
 
-    // `second` is in force through `elsewhere` too, so both are; but a choice already keeps them apart.
     sets.register(
       new RuleSet(
         'pick',
         { exclusive: true },
         new RuleSet('first', { supersedes: ['a'] }, 'b'),
         new RuleSet('second', { supersedes: ['a'] }, 'c')
-      ),
-      new RuleSet('elsewhere', 'second')
+      )
     );
 
     expect(sets.validate()).to.eql([]);
+  });
+
+  it('should report two sets beneath different members of one choice when one is in force another way too', (): void => {
+    const { sets, ran } = setUp();
+
+    sets.register(
+      new RuleSet(
+        'pick',
+        { exclusive: true, default: 'm2' },
+        new RuleSet('m1', new RuleSet('s', { supersedes: ['a'] }, 'b')),
+        new RuleSet('m2', new RuleSet('t', { supersedes: ['a'] }, 'c'))
+      ),
+      new RuleSet('top', 's')
+    );
+
+    expect(ran()).to.eql(['b', 'c', 'd', 'e', 'f']);
+    expect(problems(sets)).to.eql([
+      { kind: 'conflict', ids: ['s', 't'], blocking: true },
+    ]);
   });
 });
 
@@ -467,7 +484,7 @@ describe('RuleSetRegistry validate', (): void => {
 
     expect(ran()).to.eql(['c', 'd', 'e', 'f']);
     expect(problems(sets)).to.eql([
-      { kind: 'cycle', ids: ['x', 'y', 'x'], blocking: true },
+      { kind: 'cycle', ids: ['x', 'y'], blocking: true },
     ]);
     expect((): void => sets.check()).to.throw(RuleSetCycleError);
   });
@@ -519,8 +536,8 @@ describe('RuleSetRegistry declarations', (): void => {
     // The second states nothing about `enabled`, so the first stands, and nothing disagrees.
     expect(ran()).to.eql(['d', 'e', 'f']);
     expect(sets.validate()).to.eql([]);
-    // A set made afresh: changing it changes nothing.
-    expect(sets.get('set')).to.not.equal(sets.get('set'));
+    // The same set each time, until the set changes.
+    expect(sets.get('set')).to.equal(sets.get('set'));
     expect(sets.entries().map((set) => set.id())).to.eql(['set']);
     expect(sets.roots().map((set) => set.id())).to.eql(['set']);
     expect(first.memberIds()).to.eql(['a', 'b']);
@@ -696,5 +713,212 @@ describe('RuleSetRegistry declarations', (): void => {
     sets.set('set', false);
 
     expect(ran()).to.eql(['d', 'e', 'f']);
+  });
+});
+
+describe('RuleSetRegistry supersedes, at the edges', (): void => {
+  it('should not let a replacement that is not registered take the place of anything, until it arrives', (): void => {
+    const { rules, sets, ran } = setUp();
+
+    sets.register(new RuleSet('enhanced', { supersedes: ['a'] }, 'g'));
+
+    expect(ran()).to.eql(['a', 'b', 'c', 'd', 'e', 'f']);
+
+    rules.register(named('g'));
+
+    expect(ran()).to.eql(['b', 'c', 'd', 'e', 'f', 'g']);
+  });
+
+  it('should not report a conflict over an id nothing registered, until it arrives', (): void => {
+    const { rules, sets, ran } = setUp();
+
+    sets.register(
+      new RuleSet('first', { supersedes: ['gone'] }, 'b'),
+      new RuleSet('second', { supersedes: ['gone'] }, 'c')
+    );
+
+    expect(problems(sets)).to.eql([
+      { kind: 'unknown-superseded', ids: ['first', 'gone'], blocking: false },
+      { kind: 'unknown-superseded', ids: ['second', 'gone'], blocking: false },
+    ]);
+
+    rules.register(named('gone'));
+
+    expect(problems(sets)).to.eql([
+      { kind: 'conflict', ids: ['first', 'second'], blocking: true },
+    ]);
+    expect(ran()).to.not.include('gone');
+  });
+
+  it('should never supersede what is beneath the set itself', (): void => {
+    const { sets, ran } = setUp();
+
+    // The whole of `original` replaced, except `b`, which `enhanced` keeps by holding it; and a child set of its own.
+    sets.register(
+      new RuleSet('original', 'a', 'b'),
+      new RuleSet(
+        'enhanced',
+        { supersedes: ['original', 'kid'] },
+        'b',
+        new RuleSet('kid', 'c')
+      )
+    );
+
+    expect(ran()).to.eql(['b', 'c', 'd', 'e', 'f']);
+    expect(sets.validate()).to.eql([]);
+
+    // Another set in force still supersedes what is beneath it.
+    sets.register(new RuleSet('other', { supersedes: ['b'] }, 'd'));
+
+    expect(ran()).to.eql(['c', 'd', 'e', 'f']);
+    expect(sets.validate()).to.eql([]);
+  });
+
+  it('should report two sets superseding one rule only while something of both runs', (): void => {
+    const { sets, ran } = setUp();
+
+    sets.register(
+      new RuleSet('s', { supersedes: ['a'] }, 'b'),
+      new RuleSet('t', { supersedes: ['a'] }, 'c'),
+      new RuleSet('over', { supersedes: ['s', 't'] }, 'd')
+    );
+
+    expect(ran()).to.eql(['d', 'e', 'f']);
+    expect(sets.validate()).to.eql([]);
+
+    sets.set('over', false);
+
+    expect(problems(sets)).to.eql([
+      { kind: 'conflict', ids: ['s', 't'], blocking: true },
+    ]);
+  });
+
+  it('should not report two sets where either one supersedes the other, whichever is registered first', (): void => {
+    // `d` is beneath both, so the superseding set never supersedes it, and something of each still runs.
+    const superseding = (): RuleSet =>
+        new RuleSet('over', { supersedes: ['a', 'under'] }, 'b', 'd'),
+      superseded = (): RuleSet =>
+        new RuleSet('under', { supersedes: ['a'] }, 'c', 'd'),
+      first = setUp(),
+      second = setUp();
+
+    first.sets.register(superseding(), superseded());
+    second.sets.register(superseded(), superseding());
+
+    expect(first.ran()).to.eql(['b', 'd', 'e', 'f']);
+    expect(first.sets.validate()).to.eql([]);
+    expect(second.ran()).to.eql(['b', 'd', 'e', 'f']);
+    expect(second.sets.validate()).to.eql([]);
+  });
+
+  it('should walk a chain of sets superseding one another in time that grows with it, not with its square', (): void => {
+    const members = RuleSet.prototype.members,
+      walked = (length: number): number => {
+        const rules = new RuleRegistry(),
+          sets = new RuleSetRegistry(rules);
+
+        sets.register(
+          ...Array.from(
+            { length },
+            (_, index): RuleSet =>
+              new RuleSet(
+                `link-${index}`,
+                index + 1 < length ? { supersedes: [`link-${index + 1}`] } : {},
+                `rule-${index}`
+              )
+          )
+        );
+
+        let count = 0;
+
+        RuleSet.prototype.members = function (this: RuleSet): any {
+          count++;
+
+          return members.call(this);
+        };
+
+        try {
+          sets.set('link-0', true);
+          sets.validate();
+        } finally {
+          RuleSet.prototype.members = members;
+        }
+
+        sets.dispose();
+
+        return count;
+      };
+
+    // Four times the links, about four times the walking; walked again for each link, it is nine or ten times.
+    expect(walked(120)).to.be.below(walked(30) * 5);
+  });
+});
+
+describe('RuleSetRegistry declarations, at the edges', (): void => {
+  it('should report a choice two calls to `extend` add to, and not count a declaration with no members', (): void => {
+    const extended = setUp(),
+      empty = setUp();
+
+    extended.sets.register(new RuleSet('pick', { exclusive: true }));
+    extended.sets.extend('pick', 'a');
+    extended.sets.extend('pick', 'b');
+
+    expect(problems(extended.sets)).to.eql([
+      { kind: 'no-default', ids: ['pick'], blocking: true },
+    ]);
+
+    empty.sets.register(
+      new RuleSet('pick', { exclusive: true }, 'a', 'b'),
+      new RuleSet('pick')
+    );
+    empty.sets.extend('pick');
+
+    expect(empty.sets.validate()).to.eql([]);
+  });
+
+  it('should give one merged set until it changes, and refuse to be changed through it', (): void => {
+    const { sets } = setUp(),
+      first = new RuleSet('set', 'a'),
+      merged = (): RuleSet => sets.get('set')!;
+
+    sets.register(first, new RuleSet('set', 'b'));
+
+    const view = merged();
+
+    expect(merged()).to.equal(view);
+    expect(sets.entries()).to.eql([view]);
+    expect(sets.entries()[0]).to.equal(view);
+    expect(sets.roots()[0]).to.equal(view);
+    expect((): RuleSet => view.add('c')).to.throw(RuleSetError);
+    expect((): RuleSet => view.remove('a')).to.throw(RuleSetError);
+    expect(view.memberIds()).to.eql(['a', 'b']);
+
+    first.add('d');
+
+    expect(merged()).to.not.equal(view);
+    expect(merged().memberIds()).to.eql(['a', 'd', 'b']);
+
+    const next = merged();
+
+    sets.extend('set', 'c');
+
+    expect(merged()).to.not.equal(next);
+    expect(merged().memberIds()).to.eql(['a', 'd', 'b', 'c']);
+  });
+
+  it('should take out a set a declaration brought when another declaration of its id remains', (): void => {
+    const { sets, ran } = setUp(),
+      first = new RuleSet('first', new RuleSet('kid', 'a')),
+      second = new RuleSet('second', new RuleSet('kid', 'b'));
+
+    sets.register(first, second);
+    sets.unregister(first);
+
+    expect(sets.declarations('kid')).to.have.length(1);
+    expect(sets.get('kid')!.memberIds()).to.eql(['b']);
+
+    sets.set('second', false);
+
+    expect(ran()).to.eql(['a', 'c', 'd', 'e', 'f']);
   });
 });
