@@ -1039,48 +1039,57 @@ export class RuleSetRegistry implements IRuleSetRegistry {
       }
     });
 
-    // Every path, as `check()` has always walked them, so that the first problem found is the one it always threw.
-    const walk = (id: string, path: string[]): void => {
-      const set = this._sets.get(id);
+    // Depth first, in the order `check()` has always walked, each set entered once: a set walked already has had all
+    //  of its problems found, and a cycle reached again through it was found the first time, so the first problem is
+    //  the one it always threw. (A second cycle through the same sets may go unreported until the first is fixed.)
+    const walked = new Map<string, 'walking' | 'done'>(),
+      walk = (id: string, path: string[]): void => {
+        const set = this._sets.get(id);
 
-      if (!set) {
-        const parent = path[path.length - 1];
+        if (!set) {
+          const parent = path[path.length - 1];
 
-        if (this._rules.getById(id) === null) {
-          report(
-            {
-              kind: 'unknown-member',
-              ids: [parent, id],
-              message:
-                `Rule set '${parent}' names '${id}', which is ` +
-                'neither a registered rule nor a registered rule set.',
-            },
-            `unknown-member\n${parent}\n${id}`
-          );
+          if (this._rules.getById(id) === null) {
+            report(
+              {
+                kind: 'unknown-member',
+                ids: [parent, id],
+                message:
+                  `Rule set '${parent}' names '${id}', which is ` +
+                  'neither a registered rule nor a registered rule set.',
+              },
+              `unknown-member\n${parent}\n${id}`
+            );
+          }
+
+          return;
         }
 
-        return;
-      }
+        if (walked.get(id) === 'done') {
+          return;
+        }
 
-      if (path.includes(id)) {
-        const loop = path.slice(path.indexOf(id));
+        if (walked.get(id) === 'walking') {
+          const loop = path.slice(path.indexOf(id));
 
-        report(
-          {
-            kind: 'cycle',
-            ids: loop,
-            message: `Rule set '${id}' is inside itself: ${[...path, id].join(
-              ' → '
-            )}.`,
-          },
-          `cycle\n${[...loop].sort().join('\n')}`
-        );
+          report(
+            {
+              kind: 'cycle',
+              ids: loop,
+              message: `Rule set '${id}' is inside itself: ${[...path, id].join(
+                ' → '
+              )}.`,
+            },
+            `cycle\n${[...loop].sort().join('\n')}`
+          );
 
-        return;
-      }
+          return;
+        }
 
-      set.memberIds().forEach((member) => walk(member, [...path, id]));
-    };
+        walked.set(id, 'walking');
+        set.memberIds().forEach((member) => walk(member, [...path, id]));
+        walked.set(id, 'done');
+      };
 
     this._sets.forEach((set) => walk(set.id(), []));
 
@@ -1101,24 +1110,61 @@ export class RuleSetRegistry implements IRuleSetRegistry {
       })
     );
 
+    // A set supersedes each set beneath an id it names. Depth first, with what is being walked and what is done kept
+    //  for the whole pass, so each of those is followed once; one that leads back to a set still being walked is a
+    //  set superseding itself.
+    const superseding = new Map<string, 'walking' | 'done'>(),
+      // Each set being walked, and the id named that led to it.
+      stack: { id: string; via: string | null }[] = [],
+      visit = (id: string, via: string | null): void => {
+        superseding.set(id, 'walking');
+        stack.push({ id, via });
+
+        this._sets
+          .get(id)!
+          .supersedes()
+          .forEach((named) =>
+            this._beneath(named).sets.forEach((other) => {
+              const state = superseding.get(other);
+
+              if (state === undefined) {
+                visit(other, named);
+
+                return;
+              }
+
+              if (state === 'done') {
+                return;
+              }
+
+              const at = stack.findIndex((entry) => entry.id === other),
+                loop = [
+                  other,
+                  ...stack.slice(at + 1).map((entry) => entry.via!),
+                  named,
+                ];
+
+              report(
+                {
+                  kind: 'cycle',
+                  ids: [...new Set(loop)],
+                  message:
+                    `Rule set '${other}' supersedes itself: ${loop.join(
+                      ' → '
+                    )}` + (named === other ? '.' : `, which holds '${other}'.`),
+                },
+                `supersedes\n${[...new Set(loop)].sort().join('\n')}`
+              );
+            })
+          );
+
+        stack.pop();
+        superseding.set(id, 'done');
+      };
+
     this._sets.forEach((set) => {
-      const through = this._supersedesItself(set);
-
-      if (through !== null) {
-        const loop = [set.id(), ...through];
-
-        report(
-          {
-            kind: 'cycle',
-            ids: [...new Set(loop)],
-            message:
-              `Rule set '${set.id()}' supersedes itself: ${loop.join(' → ')}` +
-              (through[through.length - 1] === set.id()
-                ? '.'
-                : `, which holds '${set.id()}'.`),
-          },
-          `supersedes\n${[...new Set(loop)].sort().join('\n')}`
-        );
+      if (!superseding.has(set.id())) {
+        visit(set.id(), null);
       }
     });
 
@@ -1552,8 +1598,12 @@ export class RuleSetRegistry implements IRuleSetRegistry {
 
   /** Whether each rule in the tree runs: see the class comment. */
   private _evaluate(): Map<string, boolean> {
+    // Each set entered at most twice, inactive and then active: a path can only make what is beneath it less active,
+    //  so entering a set again as active as before (or less) finds nothing new. Many paths to one set are walked once,
+    //  and a set inside itself stops there.
     const effective = new Map<string, boolean>(),
-      visit = (id: string, active: boolean, path: Set<string>): void => {
+      entered = new Map<string, boolean>(),
+      visit = (id: string, active: boolean): void => {
         const set = this._sets.get(id);
 
         if (!set) {
@@ -1565,28 +1615,24 @@ export class RuleSetRegistry implements IRuleSetRegistry {
           return;
         }
 
-        if (path.has(id)) {
+        const before = entered.get(id);
+
+        if (before === true || (before === false && !active)) {
           return;
         }
 
-        path.add(id);
+        entered.set(id, active);
 
         const chosen = set.exclusive() ? this._chosenOf(set) : null;
 
         set
           .memberIds()
           .forEach((member) =>
-            visit(
-              member,
-              active && (!set.exclusive() || member === chosen),
-              path
-            )
+            visit(member, active && (!set.exclusive() || member === chosen))
           );
-
-        path.delete(id);
       };
 
-    this._tops().forEach((top) => visit(top.id(), true, new Set()));
+    this._tops().forEach((top) => visit(top.id(), true));
 
     // A superseded rule need not be in any set: the rule a set takes the place of is usually another package's, which
     //  that package never put in one.
@@ -1738,67 +1784,27 @@ export class RuleSetRegistry implements IRuleSetRegistry {
 
       const beneath = this._beneath(id);
 
-      beneath.rules.forEach((rule) => rules.add(rule));
+      // What the set holds itself through a live path is never superseded by it, and nothing is carried through it
+      //  either: superseding it does nothing at all.
+
+      beneath.rules.forEach((rule) => {
+        if (!own.rules.has(rule)) {
+          rules.add(rule);
+        }
+      });
       beneath.sets.forEach((other) => {
-        sets.add(other);
-        queue.push(...this._sets.get(other)!.supersedes());
+        if (!own.sets.has(other)) {
+          sets.add(other);
+          queue.push(...this._sets.get(other)!.supersedes());
+        }
       });
     }
-
-    own.rules.forEach((rule) => rules.delete(rule));
-    own.sets.forEach((other) => sets.delete(other));
 
     const reach = { rules, sets };
 
     this._cache?.reach.set(set.id(), reach);
 
     return reach;
-  }
-
-  /**
-   * The ids, from what `set` names, by which it comes to supersede itself:
-   * the last of them is the set, or a set that holds it. `null` when it does
-   * not.
-   */
-  private _supersedesItself(set: MergedRuleSet): string[] | null {
-    const from = new Map<string, string | null>(),
-      queue: string[] = [];
-
-    set.supersedes().forEach((id) => {
-      if (!from.has(id)) {
-        from.set(id, null);
-        queue.push(id);
-      }
-    });
-
-    while (queue.length > 0) {
-      const id = queue.shift()!,
-        beneath = this._beneath(id).sets;
-
-      if (beneath.has(set.id())) {
-        const through: string[] = [];
-
-        for (let at: string | null = id; at !== null; at = from.get(at)!) {
-          through.unshift(at);
-        }
-
-        return through;
-      }
-
-      beneath.forEach((other) =>
-        this._sets
-          .get(other)!
-          .supersedes()
-          .forEach((next) => {
-            if (!from.has(next)) {
-              from.set(next, id);
-              queue.push(next);
-            }
-          })
-      );
-    }
-
-    return null;
   }
 
   /**
@@ -1899,9 +1905,15 @@ export class RuleSetRegistry implements IRuleSetRegistry {
     inForce.forEach((set) => {
       const { rules, sets } = this._reach(set);
 
-      [...sets, ...rules].forEach((id) =>
-        superseded.set(id, [...(superseded.get(id) ?? []), set.id()])
-      );
+      [...sets, ...rules].forEach((id) => {
+        const by = superseded.get(id);
+
+        if (by) {
+          by.push(set.id());
+        } else {
+          superseded.set(id, [set.id()]);
+        }
+      });
     });
 
     return superseded;

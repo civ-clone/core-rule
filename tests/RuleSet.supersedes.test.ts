@@ -1227,3 +1227,172 @@ describe('RuleSetRegistry declarations, kept apart from the merged set', (): voi
     expect(sets.chosen('pick')).to.equal('a');
   });
 });
+
+describe('RuleSetRegistry superseding what a set holds itself', (): void => {
+  it('should carry nothing through a child it holds, or a rule', (): void => {
+    const { sets, ran } = setUp();
+
+    // `kid` is switched off, so it is not in force itself; superseding it from `parent` does nothing at all.
+    sets.register(
+      new RuleSet(
+        'parent',
+        { supersedes: ['kid', 'b'] },
+        'b',
+        new RuleSet('kid', { enabled: false, supersedes: ['a'] }, 'c')
+      )
+    );
+
+    expect(ran()).to.eql(['a', 'b', 'd', 'e', 'f']);
+    consistent(sets);
+  });
+
+  it('should carry nothing through a set it holds that is beneath one it supersedes', (): void => {
+    const { sets, ran } = setUp(),
+      kid = new RuleSet('kid', { enabled: false, supersedes: ['a'] }, 'c');
+
+    sets.register(
+      new RuleSet('other', 'd', kid),
+      new RuleSet('parent', { supersedes: ['other'] }, 'b', kid)
+    );
+
+    // `d` is superseded with `other`; `kid` is `parent`'s own, so its superseding is not carried through to `a`.
+    expect(ran()).to.eql(['a', 'b', 'e', 'f']);
+    consistent(sets);
+  });
+});
+
+describe('RuleSetRegistry validating long chains', (): void => {
+  const chain = (
+    length: number,
+    options: (index: number) => {}
+  ): RuleSetRegistry => {
+    const sets = new RuleSetRegistry(new RuleRegistry());
+
+    sets.register(
+      ...Array.from(
+        { length },
+        (_, index): RuleSet =>
+          new RuleSet(`link-${index}`, options(index), `rule-${index}`)
+      )
+    );
+
+    return sets;
+  };
+
+  it('should follow each set superseding another once a validation', (): void => {
+    const supersedes = RuleSet.prototype.supersedes,
+      followed = (length: number): number => {
+        // None of the rules is registered, so none of the sets is in force: what is counted is the search for cycles.
+        const sets = chain(length, (index) =>
+          index + 1 < length ? { supersedes: [`link-${index + 1}`] } : {}
+        );
+
+        let count = 0;
+
+        RuleSet.prototype.supersedes = function (this: RuleSet): string[] {
+          count++;
+
+          return supersedes.call(this);
+        };
+
+        try {
+          sets.validate();
+        } finally {
+          RuleSet.prototype.supersedes = supersedes;
+        }
+
+        sets.dispose();
+
+        return count;
+      };
+
+    // Four times the links, about four times the following; searched from every set, it is sixteen times.
+    expect(followed(120)).to.be.below(followed(30) * 5);
+  });
+
+  it('should walk each set inside another once a validation, however many paths reach it', (): void => {
+    const members = RuleSet.prototype.members,
+      walked = (depth: number): number => {
+        const sets = new RuleSetRegistry(new RuleRegistry());
+
+        // Each level holds two sets, each of which holds the next level: 2^depth paths to the bottom.
+        let below: string[] = ['bottom'];
+
+        sets.register(new RuleSet('bottom', 'rule'));
+
+        for (let level = depth; level > 0; level--) {
+          const pair = [`left-${level}`, `right-${level}`];
+
+          sets.register(...pair.map((id) => new RuleSet(id, ...below)));
+          below = pair;
+        }
+
+        let count = 0;
+
+        RuleSet.prototype.members = function (this: RuleSet): any {
+          count++;
+
+          return members.call(this);
+        };
+
+        try {
+          sets.validate();
+        } finally {
+          RuleSet.prototype.members = members;
+        }
+
+        sets.dispose();
+
+        return count;
+      };
+
+    // Twice the depth, about twice the walking; following every path, it is hundreds of times.
+    expect(walked(16)).to.be.below(walked(8) * 4);
+  });
+
+  it('should not copy what supersedes each rule each time it adds to it', (): void => {
+    const iterator = Array.prototype[Symbol.iterator],
+      copied = (length: number): number => {
+        const sets = chain(length, (index) =>
+          index + 1 < length ? { supersedes: [`link-${index + 1}`] } : {}
+        );
+
+        sets
+          .ruleRegistry()
+          .register(
+            ...Array.from({ length }, (_, index) => named(`rule-${index}`))
+          );
+
+        let count = 0;
+
+        Array.prototype[Symbol.iterator] = function (this: unknown[]): any {
+          const inner = iterator.call(this);
+
+          return {
+            next: (): IteratorResult<unknown> => {
+              count++;
+
+              return inner.next();
+            },
+            [Symbol.iterator]() {
+              return this;
+            },
+          };
+        };
+
+        try {
+          sets.set('link-0', true);
+        } finally {
+          Array.prototype[Symbol.iterator] = iterator;
+        }
+
+        sets.dispose();
+
+        return count;
+      };
+
+    // Every set in force supersedes all those after it, so the work grows with the square of the links: four times
+    //  the links, sixteen times the work. Copying each list as it grows makes it the cube, sixty-four times.
+    expect(copied(120)).to.be.below(copied(30) * 25);
+  });
+});

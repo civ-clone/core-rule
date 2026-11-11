@@ -375,12 +375,6 @@ export declare class RuleSetRegistry implements IRuleSetRegistry {
    */
   private _reach;
   /**
-   * The ids, from what `set` names, by which it comes to supersede itself:
-   * the last of them is the set, or a set that holds it. `null` when it does
-   * not.
-   */
-  private _supersedesItself;
-  /**
    * The sets that supersede something and are in force, in the order
    * registered: some path to the set is active, and at least one registered
    * rule beneath it, through the chosen member of any choice, is switched on.
