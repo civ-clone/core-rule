@@ -13,7 +13,8 @@ export type RuleSetState = 'on' | 'off' | 'mixed';
  *
  * - `conflict`: two sets in force, something of each of which runs,
  *   supersede the same registered rule, neither supersedes the other, and
- *   neither is beneath the other. One has to be switched off.
+ *   neither is beneath the other: only one of them can be in force. How the
+ *   player settles it is the host's to say.
  * - `cycle`: a set inside itself, or superseding itself through others.
  * - `duplicate-id`: a set's id is also a rule's.
  * - `option-conflict`: two declarations of a set state an option differently.
@@ -68,12 +69,12 @@ export type RuleSetDescription = {
    */
   state: RuleSetState;
   /**
-   * Whether the path to this node is live: `false` beneath a member of a
-   * choice that is not the one chosen, for what is superseded, and beneath a
-   * superseded set (except what the superseding set holds through a live path
-   * itself, which has an active node there). What is not active keeps its
-   * setting. A rule runs exactly when it is registered, switched on, and at
-   * least one of its nodes is active.
+   * Whether this node is live: `false` beneath a member of a choice that is
+   * not the one chosen, and for what is superseded itself. A superseded set
+   * does not make what is beneath it inactive: a rule there that is not
+   * superseded itself still runs. What is not active keeps its setting. A rule
+   * runs exactly when it is registered, switched on, and at least one of its
+   * nodes is active.
    */
   active: boolean;
   /** A set or choice: the ids it supersedes, as it declares them. */
@@ -182,6 +183,8 @@ export declare class RuleSetRegistry implements IRuleSetRegistry {
   private _holdersOf;
   /** The superseding sets in force as last worked out. */
   private _inForceNow;
+  /** The sets active by path as last worked out, while any set supersedes anything. */
+  private _activeNow;
   private _cache;
   private _chosen;
   /** The rules that start off, worked out when first asked after the tree changes. */
@@ -313,7 +316,7 @@ export declare class RuleSetRegistry implements IRuleSetRegistry {
    *
    * The orphans (`unknown-*`) only mean anything once every package has
    * loaded, and even then are only shown. A `conflict` is the player's to
-   * settle, by switching one of the two sets off, and goes as soon as they do.
+   * settle, and goes as soon as only one of the two sets is in force.
    */
   validate(): RuleSetProblem[];
   private _validate;

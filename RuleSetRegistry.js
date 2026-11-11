@@ -261,6 +261,8 @@ class RuleSetRegistry {
         this._holdersOf = null;
         /** The superseding sets in force as last worked out. */
         this._inForceNow = new Set();
+        /** The sets active by path as last worked out, while any set supersedes anything. */
+        this._activeNow = new Set();
         this._cache = null;
         this._chosen = new Map();
         /** The rules that start off, worked out when first asked after the tree changes. */
@@ -291,9 +293,11 @@ class RuleSetRegistry {
                 return;
             }
             // A rule that a superseding set holds through a live path can bring that set into force, and so switch off
-            //  other rules: a replacement counts only once it is there. Its arrival can never take a set out of force, so
-            //  a set already in force has nothing to gain from working everything out again.
-            if (((_a = this._holders().get(id)) !== null && _a !== void 0 ? _a : []).some((holder) => !this._inForceNow.has(holder))) {
+            //  other rules: a replacement counts only once it is there. Only if it is switched on, though, and only a set
+            //  that is active by path and not in force already: its arrival can never take a set out of force, nor make a
+            //  path active.
+            if (this._value(id) &&
+                ((_a = this._holders().get(id)) !== null && _a !== void 0 ? _a : []).some((holder) => !this._inForceNow.has(holder) && this._activeNow.has(holder))) {
                 this._apply();
                 return;
             }
@@ -328,6 +332,7 @@ class RuleSetRegistry {
         this._effective = new Map();
         this._holdersOf = null;
         this._inForceNow = new Set();
+        this._activeNow = new Set();
         // By the rule and not its id: one that is not registered just now would otherwise stay off for good, since
         //  nothing is listening for it to come back.
         this._switchedOff.forEach((rule) => rule.enable());
@@ -644,6 +649,8 @@ class RuleSetRegistry {
                 ...(by ? { supersededBy: by } : {}),
             };
         }, describe = (id, onPath, path) => {
+            // A superseded set is not active, but what is beneath it is cut off only where it is superseded too: what runs
+            //  is worked out rule by rule, and a rule beneath it that nothing supersedes still runs.
             const set = this._sets.get(id), active = onPath && !superseded.has(id);
             if (!set) {
                 return {
@@ -659,7 +666,7 @@ class RuleSetRegistry {
             const chosen = set.exclusive() ? this._chosenOf(set) : null, inside = new Set(path).add(id), members = set
                 .memberIds()
                 .filter((member) => !inside.has(member))
-                .map((member) => describe(member, active && (!set.exclusive() || member === chosen), inside));
+                .map((member) => describe(member, onPath && (!set.exclusive() || member === chosen), inside));
             return set.exclusive()
                 ? {
                     id,
@@ -713,7 +720,7 @@ class RuleSetRegistry {
      *
      * The orphans (`unknown-*`) only mean anything once every package has
      * loaded, and even then are only shown. A `conflict` is the player's to
-     * settle, by switching one of the two sets off, and goes as soon as they do.
+     * settle, and goes as soon as only one of the two sets is in force.
      */
     validate() {
         return this._cached(() => this._validate());
@@ -894,20 +901,13 @@ class RuleSetRegistry {
                 this._beneath(second.id()).sets.has(first.id())) {
                 return;
             }
-            // Only what can be done: a choice, or a set whose rules are all beneath choices, has no switch.
-            const switchable = [first, second].filter((set) => !set.exclusive() && this._leaves(set.id()).length > 0), remedy = switchable.length === 2
-                ? 'switch one of them off.'
-                : switchable.length === 1
-                    ? `switch '${switchable[0].id()}' off (the other has no ` +
-                        'switch).'
-                    : 'neither can be switched off, so the packages they come ' +
-                        'from cannot be used together.';
+            // What the player can do about it (switch one off, choose another alternative above it) is for the host to say.
             report({
                 kind: 'conflict',
                 ids: [first.id(), second.id()],
-                message: `Rule sets '${first.id()}' and '${second.id()}' both supersede ` +
-                    `${shared.map((rule) => `'${rule}'`).join(', ')}, and neither ` +
-                    `supersedes the other: ${remedy}`,
+                message: `Rule sets '${first.id()}' and '${second.id()}' both replace ` +
+                    `${shared.map((rule) => `'${rule}'`).join(', ')}, and only one ` +
+                    'of them can be in force.',
             }, `conflict\n${first.id()}\n${second.id()}`);
         }));
         return problems;
@@ -1231,9 +1231,13 @@ class RuleSetRegistry {
                 continue;
             }
             named.add(id);
-            const beneath = this._beneath(id);
             // What the set holds itself through a live path is never superseded by it, and nothing is carried through it
-            //  either: superseding it does nothing at all.
+            //  either, nor through anything beneath it: naming it does nothing at all. Anything else beneath what it names
+            //  is superseded, and carries through, even a set it holds itself only as an alternative not chosen.
+            if (own.rules.has(id) || own.sets.has(id)) {
+                continue;
+            }
+            const beneath = this._beneath(id);
             beneath.rules.forEach((rule) => {
                 if (!own.rules.has(rule)) {
                     rules.add(rule);
@@ -1291,6 +1295,7 @@ class RuleSetRegistry {
             return on;
         };
         this._tops().forEach((top) => reach(top.id()));
+        this._activeNow = active;
         return superseding.filter((set) => active.has(set.id()) && switchedOn(set.id(), new Set()));
     }
     /** Each rule id, and the superseding sets that hold it through a live path. */

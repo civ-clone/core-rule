@@ -28,7 +28,8 @@ export type RuleSetState = 'on' | 'off' | 'mixed';
  *
  * - `conflict`: two sets in force, something of each of which runs,
  *   supersede the same registered rule, neither supersedes the other, and
- *   neither is beneath the other. One has to be switched off.
+ *   neither is beneath the other: only one of them can be in force. How the
+ *   player settles it is the host's to say.
  * - `cycle`: a set inside itself, or superseding itself through others.
  * - `duplicate-id`: a set's id is also a rule's.
  * - `option-conflict`: two declarations of a set state an option differently.
@@ -93,12 +94,12 @@ export type RuleSetDescription = {
    */
   state: RuleSetState;
   /**
-   * Whether the path to this node is live: `false` beneath a member of a
-   * choice that is not the one chosen, for what is superseded, and beneath a
-   * superseded set (except what the superseding set holds through a live path
-   * itself, which has an active node there). What is not active keeps its
-   * setting. A rule runs exactly when it is registered, switched on, and at
-   * least one of its nodes is active.
+   * Whether this node is live: `false` beneath a member of a choice that is
+   * not the one chosen, and for what is superseded itself. A superseded set
+   * does not make what is beneath it inactive: a rule there that is not
+   * superseded itself still runs. What is not active keeps its setting. A rule
+   * runs exactly when it is registered, switched on, and at least one of its
+   * nodes is active.
    */
   active: boolean;
   /** A set or choice: the ids it supersedes, as it declares them. */
@@ -403,6 +404,8 @@ export class RuleSetRegistry implements IRuleSetRegistry {
   private _holdersOf: Map<string, string[]> | null = null;
   /** The superseding sets in force as last worked out. */
   private _inForceNow: Set<string> = new Set();
+  /** The sets active by path as last worked out, while any set supersedes anything. */
+  private _activeNow: Set<string> = new Set();
   private _cache: {
     beneath: Map<string, { rules: Set<string>; sets: Set<string> }>;
     live: Map<string, { rules: Set<string>; sets: Set<string> }>;
@@ -458,11 +461,14 @@ export class RuleSetRegistry implements IRuleSetRegistry {
       }
 
       // A rule that a superseding set holds through a live path can bring that set into force, and so switch off
-      //  other rules: a replacement counts only once it is there. Its arrival can never take a set out of force, so
-      //  a set already in force has nothing to gain from working everything out again.
+      //  other rules: a replacement counts only once it is there. Only if it is switched on, though, and only a set
+      //  that is active by path and not in force already: its arrival can never take a set out of force, nor make a
+      //  path active.
       if (
+        this._value(id) &&
         (this._holders().get(id) ?? []).some(
-          (holder) => !this._inForceNow.has(holder)
+          (holder) =>
+            !this._inForceNow.has(holder) && this._activeNow.has(holder)
         )
       ) {
         this._apply();
@@ -504,6 +510,7 @@ export class RuleSetRegistry implements IRuleSetRegistry {
     this._effective = new Map();
     this._holdersOf = null;
     this._inForceNow = new Set();
+    this._activeNow = new Set();
 
     // By the rule and not its id: one that is not registered just now would otherwise stay off for good, since
     //  nothing is listening for it to come back.
@@ -915,6 +922,8 @@ export class RuleSetRegistry implements IRuleSetRegistry {
         onPath: boolean,
         path: Set<string>
       ): RuleSetDescription => {
+        // A superseded set is not active, but what is beneath it is cut off only where it is superseded too: what runs
+        //  is worked out rule by rule, and a rule beneath it that nothing supersedes still runs.
         const set = this._sets.get(id),
           active = onPath && !superseded.has(id);
 
@@ -938,7 +947,7 @@ export class RuleSetRegistry implements IRuleSetRegistry {
             .map((member) =>
               describe(
                 member,
-                active && (!set.exclusive() || member === chosen),
+                onPath && (!set.exclusive() || member === chosen),
                 inside
               )
             );
@@ -1005,7 +1014,7 @@ export class RuleSetRegistry implements IRuleSetRegistry {
    *
    * The orphans (`unknown-*`) only mean anything once every package has
    * loaded, and even then are only shown. A `conflict` is the player's to
-   * settle, by switching one of the two sets off, and goes as soon as they do.
+   * settle, and goes as soon as only one of the two sets is in force.
    */
   validate(): RuleSetProblem[] {
     return this._cached(() => this._validate());
@@ -1299,27 +1308,15 @@ export class RuleSetRegistry implements IRuleSetRegistry {
           return;
         }
 
-        // Only what can be done: a choice, or a set whose rules are all beneath choices, has no switch.
-        const switchable = [first, second].filter(
-            (set) => !set.exclusive() && this._leaves(set.id()).length > 0
-          ),
-          remedy =
-            switchable.length === 2
-              ? 'switch one of them off.'
-              : switchable.length === 1
-              ? `switch '${switchable[0].id()}' off (the other has no ` +
-                'switch).'
-              : 'neither can be switched off, so the packages they come ' +
-                'from cannot be used together.';
-
+        // What the player can do about it (switch one off, choose another alternative above it) is for the host to say.
         report(
           {
             kind: 'conflict',
             ids: [first.id(), second.id()],
             message:
-              `Rule sets '${first.id()}' and '${second.id()}' both supersede ` +
-              `${shared.map((rule) => `'${rule}'`).join(', ')}, and neither ` +
-              `supersedes the other: ${remedy}`,
+              `Rule sets '${first.id()}' and '${second.id()}' both replace ` +
+              `${shared.map((rule) => `'${rule}'`).join(', ')}, and only one ` +
+              'of them can be in force.',
           },
           `conflict\n${first.id()}\n${second.id()}`
         );
@@ -1782,10 +1779,14 @@ export class RuleSetRegistry implements IRuleSetRegistry {
 
       named.add(id);
 
-      const beneath = this._beneath(id);
-
       // What the set holds itself through a live path is never superseded by it, and nothing is carried through it
-      //  either: superseding it does nothing at all.
+      //  either, nor through anything beneath it: naming it does nothing at all. Anything else beneath what it names
+      //  is superseded, and carries through, even a set it holds itself only as an alternative not chosen.
+      if (own.rules.has(id) || own.sets.has(id)) {
+        continue;
+      }
+
+      const beneath = this._beneath(id);
 
       beneath.rules.forEach((rule) => {
         if (!own.rules.has(rule)) {
@@ -1866,6 +1867,8 @@ export class RuleSetRegistry implements IRuleSetRegistry {
       };
 
     this._tops().forEach((top) => reach(top.id()));
+
+    this._activeNow = active;
 
     return superseding.filter(
       (set) => active.has(set.id()) && switchedOn(set.id(), new Set())

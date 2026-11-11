@@ -1063,8 +1063,8 @@ describe('RuleSetRegistry supersedes, through live paths', (): void => {
   });
 });
 
-describe('RuleSetRegistry conflicts, and what can be done about them', (): void => {
-  it('should name the set that can be switched off, when only one can', (): void => {
+describe('RuleSetRegistry conflicts, and how they are worded', (): void => {
+  it('should name both sets and the rule, and leave the remedy to the host', (): void => {
     const { sets } = setUp();
 
     sets.register(
@@ -1075,10 +1075,13 @@ describe('RuleSetRegistry conflicts, and what can be done about them', (): void 
     expect(problems(sets)).to.eql([
       { kind: 'conflict', ids: ['plain', 'pick'], blocking: true },
     ]);
-    expect(sets.validate()[0].message).to.match(/switch 'plain' off/);
+    expect(sets.validate()[0].message).to.equal(
+      "Rule sets 'plain' and 'pick' both replace 'a', and only one of them " +
+        'can be in force.'
+    );
   });
 
-  it('should say when neither set can be switched off', (): void => {
+  it('should word a conflict the same way when neither set has a switch', (): void => {
     const { sets } = setUp();
 
     sets.register(
@@ -1093,8 +1096,10 @@ describe('RuleSetRegistry conflicts, and what can be done about them', (): void 
     expect(problems(sets)).to.eql([
       { kind: 'conflict', ids: ['pick', 'heading'], blocking: true },
     ]);
-    expect(sets.validate()[0].message).to.match(/neither can be switched off/);
-    expect(sets.validate()[0].message).to.not.match(/switch one/);
+    expect(sets.validate()[0].message).to.equal(
+      "Rule sets 'pick' and 'heading' both replace 'a', and only one of " +
+        'them can be in force.'
+    );
   });
 });
 
@@ -1394,5 +1399,151 @@ describe('RuleSetRegistry validating long chains', (): void => {
     // Every set in force supersedes all those after it, so the work grows with the square of the links: four times
     //  the links, sixteen times the work. Copying each list as it grows makes it the cube, sixty-four times.
     expect(copied(120)).to.be.below(copied(30) * 25);
+  });
+});
+
+describe('RuleSetRegistry superseding through what a set names', (): void => {
+  it('should carry nothing through anything beneath a set it names and holds itself', (): void => {
+    const rules = new RuleRegistry(),
+      sets = new RuleSetRegistry(rules);
+
+    rules.register(...['c', 'd', 'e', 'n'].map(named));
+    sets.register(
+      new RuleSet(
+        'S',
+        { supersedes: ['X'] },
+        'n',
+        new RuleSet(
+          'X',
+          { exclusive: true },
+          'c',
+          new RuleSet('Z', { supersedes: ['e'] }, 'd')
+        )
+      )
+    );
+
+    // `Z` is an alternative not chosen, so not in force: nothing replaces `e`, and `S` naming `X` does nothing.
+    expect(rules.process(Example)).to.eql(['c', 'e', 'n']);
+    expect(sets.validate()).to.eql([]);
+    consistent(sets);
+  });
+
+  it('should supersede, and carry through, a set it holds only as an alternative not chosen, when it names another that holds it', (): void => {
+    const rules = new RuleRegistry(),
+      sets = new RuleSetRegistry(rules),
+      z = new RuleSet('Z', { supersedes: ['e'] }, 'd');
+
+    rules.register(...['c', 'd', 'e', 'n', 't'].map(named));
+    sets.register(
+      new RuleSet('T', 't', z),
+      new RuleSet(
+        'S',
+        { supersedes: ['T'] },
+        'n',
+        new RuleSet('X', { exclusive: true }, 'c', z)
+      )
+    );
+
+    expect(rules.process(Example)).to.eql(['c', 'n']);
+    consistent(sets);
+
+    const find = (
+      nodes: RuleSetDescription[],
+      id: string
+    ): RuleSetDescription | undefined =>
+      nodes
+        .map((node) => (node.id === id ? node : find(node.members, id)))
+        .find((node) => node !== undefined);
+
+    expect(find(sets.describe(), 'Z')!.supersededBy).to.eql(['S']);
+  });
+});
+
+describe('RuleSetRegistry describing what runs beneath a superseded set', (): void => {
+  it('should leave a rule beneath a superseded set active where nothing supersedes the rule itself', (): void => {
+    const rules = new RuleRegistry(),
+      sets = new RuleSetRegistry(rules);
+
+    rules.register(named('r'), named('x'));
+    sets.register(
+      new RuleSet('A', { supersedes: ['B'] }, 'C'),
+      new RuleSet('B', { supersedes: ['C'] }, 'r'),
+      new RuleSet('C', 'r', 'x')
+    );
+
+    // `A` supersedes `B` (and holds `C`, so carries nothing through to it); `B` is in force by its settings, and
+    //  supersedes `C` except its own `r`. So `x` is off, and `r` runs, though both sets it is in are superseded.
+    expect(rules.process(Example)).to.eql(['r']);
+    consistent(sets);
+
+    const [a] = sets.describe(),
+      b = sets.describe()[1];
+
+    expect(a.members[0].members[0]).to.include({ id: 'r', active: true });
+    expect(b).to.include({ id: 'B', active: false });
+    expect(b.supersededBy).to.eql(['A']);
+    expect(b.members[0]).to.include({ id: 'r', active: true });
+  });
+});
+
+describe('RuleSetRegistry and late rules beneath a set not in force', (): void => {
+  const asked = (
+    holder: (ids: string[]) => RuleSet,
+    length: number
+  ): number => {
+    const rules = new RuleRegistry(),
+      sets = new RuleSetRegistry(rules),
+      ids = Array.from({ length }, (_, index): string => `rule-${index}`),
+      getById = rules.getById.bind(rules);
+
+    sets.register(holder(ids));
+
+    let count = 0;
+
+    rules.getById = (id: string): Rule | null => {
+      count++;
+
+      return getById(id);
+    };
+
+    rules.register(...ids.map(named));
+    sets.dispose();
+
+    return count;
+  };
+
+  it('should not work everything out again for each rule of a superseding set that starts off', (): void => {
+    const holder = (ids: string[]): RuleSet =>
+      new RuleSet('enhanced', { enabled: false, supersedes: ['old'] }, ...ids);
+
+    expect(asked(holder, 400)).to.be.below(asked(holder, 100) * 5);
+  });
+
+  it('should not work everything out again for each rule of a superseding set beneath an alternative not chosen', (): void => {
+    const holder = (ids: string[]): RuleSet =>
+      new RuleSet(
+        'pick',
+        { exclusive: true },
+        'plain',
+        new RuleSet('enhanced', { supersedes: ['old'] }, ...ids)
+      );
+
+    expect(asked(holder, 400)).to.be.below(asked(holder, 100) * 5);
+  });
+
+  it('should still bring a set into force when it is switched on after its rules arrived', (): void => {
+    const rules = new RuleRegistry(),
+      sets = new RuleSetRegistry(rules);
+
+    sets.register(
+      new RuleSet('enhanced', { enabled: false, supersedes: ['old'] }, 'x')
+    );
+    rules.register(named('old'), named('x'));
+
+    expect(rules.process(Example)).to.eql(['old']);
+
+    sets.set('enhanced', true);
+
+    expect(rules.process(Example)).to.eql(['x']);
   });
 });
