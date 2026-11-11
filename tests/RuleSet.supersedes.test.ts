@@ -1,6 +1,7 @@
 import {
   RuleSetConflictError,
   RuleSetCycleError,
+  RuleSetDescription,
   RuleSetNoDefaultError,
   RuleSetOptionConflictError,
   RuleSetProblem,
@@ -34,6 +35,33 @@ const setUp = (): {
 // The problems without their messages, which are for people.
 const problems = (sets: RuleSetRegistry): Omit<RuleSetProblem, 'message'>[] =>
   sets.validate().map(({ kind, ids, blocking }) => ({ kind, ids, blocking }));
+
+// What `describe()` says agrees with what runs: a rule in some set runs exactly when it is registered, switched on, and
+//  has at least one active node.
+const consistent = (sets: RuleSetRegistry): void => {
+  const nodes = new Map<string, RuleSetDescription[]>(),
+    walk = (node: RuleSetDescription): void => {
+      if (node.kind === 'rule') {
+        nodes.set(node.id, [...(nodes.get(node.id) ?? []), node]);
+      }
+
+      node.members.forEach(walk);
+    };
+
+  sets.describe().forEach(walk);
+
+  nodes.forEach((found, id) => {
+    const rule = sets.ruleRegistry().getById(id);
+
+    if (rule === null) {
+      return;
+    }
+
+    expect(rule.enabled(), id).to.equal(
+      found[0].state === 'on' && found.some((node) => node.active)
+    );
+  });
+};
 
 describe('RuleSet options', (): void => {
   it('should say what it supersedes, each once, and nothing by default', (): void => {
@@ -151,9 +179,13 @@ describe('RuleSetRegistry supersedes', (): void => {
 
     expect(ran()).to.eql(['d', 'e', 'f']);
 
+    consistent(sets);
+
     sets.choose('pick', 'c');
 
     expect(ran()).to.eql(['d', 'e', 'f']);
+
+    consistent(sets);
 
     const [original] = sets.describe();
 
@@ -169,6 +201,8 @@ describe('RuleSetRegistry supersedes', (): void => {
     sets.set('enhanced', false);
 
     expect(ran()).to.eql(['a', 'c', 'e', 'f']);
+
+    consistent(sets);
   });
 
   it('should carry supersession through a set that is switched off', (): void => {
@@ -182,17 +216,25 @@ describe('RuleSetRegistry supersedes', (): void => {
 
     expect(ran()).to.eql(['c', 'd', 'e', 'f']);
 
+    consistent(sets);
+
     sets.set('b-set', false);
 
     expect(ran()).to.eql(['c', 'd', 'e', 'f']);
+
+    consistent(sets);
 
     sets.set('c-set', false);
 
     expect(ran()).to.eql(['a', 'd', 'e', 'f']);
 
+    consistent(sets);
+
     sets.set('b-set', true);
 
     expect(ran()).to.eql(['b', 'd', 'e', 'f']);
+
+    consistent(sets);
     expect(sets.validate()).to.eql([]);
   });
 
@@ -231,9 +273,13 @@ describe('RuleSetRegistry supersedes', (): void => {
 
     expect(ran()).to.eql(['a', 'c', 'd', 'e', 'f']);
 
+    consistent(sets);
+
     sets.choose('pick', 'enhanced');
 
     expect(ran()).to.eql(['b', 'd', 'e', 'f']);
+
+    consistent(sets);
   });
 
   it('should not be in force with no rule beneath it switched on, or none at all', (): void => {
@@ -765,12 +811,16 @@ describe('RuleSetRegistry supersedes, at the edges', (): void => {
     );
 
     expect(ran()).to.eql(['b', 'c', 'd', 'e', 'f']);
+
+    consistent(sets);
     expect(sets.validate()).to.eql([]);
 
     // Another set in force still supersedes what is beneath it.
     sets.register(new RuleSet('other', { supersedes: ['b'] }, 'd'));
 
     expect(ran()).to.eql(['c', 'd', 'e', 'f']);
+
+    consistent(sets);
     expect(sets.validate()).to.eql([]);
   });
 
@@ -951,5 +1001,229 @@ describe('RuleSetRegistry conflicts within one subtree', (): void => {
     expect(problems(siblings.sets)).to.eql([
       { kind: 'conflict', ids: ['first', 'second'], blocking: true },
     ]);
+  });
+});
+
+describe('RuleSetRegistry supersedes, through live paths', (): void => {
+  it('should exempt from its own superseding only what a set holds through the chosen member', (): void => {
+    const rules = new RuleRegistry(),
+      sets = new RuleSetRegistry(rules),
+      ran = (): string[] => rules.process(Example);
+
+    rules.register(...['a', 'b', 'c', 'new'].map(named));
+    sets.register(
+      new RuleSet('orig', 'a', 'b'),
+      new RuleSet(
+        'enhanced',
+        { supersedes: ['orig'] },
+        'new',
+        new RuleSet('pick', { exclusive: true, default: 'c' }, 'c', 'b')
+      )
+    );
+
+    // `c` chosen over `b`: `b` is superseded with the rest of `orig`.
+    expect(ran()).to.eql(['c', 'new']);
+    consistent(sets);
+
+    const pick = sets.describe()[1].members[1];
+
+    expect(pick.members[1]).to.include({ id: 'b', active: false });
+    expect(pick.members[1].supersededBy).to.eql(['enhanced']);
+
+    sets.choose('pick', 'b');
+
+    expect(ran()).to.eql(['b', 'new']);
+    consistent(sets);
+    expect(sets.describe()[1].members[1].members[1]).to.eql({
+      id: 'b',
+      kind: 'rule',
+      state: 'on',
+      active: true,
+      switchable: true,
+      members: [],
+    });
+  });
+
+  it('should not mark a set it holds itself as superseded, though another set it supersedes holds it too', (): void => {
+    const { sets, ran } = setUp(),
+      shared = new RuleSet('shared', 'c');
+
+    sets.register(
+      new RuleSet('other', 'a', shared),
+      new RuleSet('enhanced', { supersedes: ['other'] }, 'b', shared)
+    );
+
+    expect(ran()).to.eql(['b', 'c', 'd', 'e', 'f']);
+    consistent(sets);
+
+    const held = sets.describe()[1].members[1];
+
+    expect(held).to.include({ id: 'shared', active: true });
+    expect(held.supersededBy).to.be.undefined;
+  });
+});
+
+describe('RuleSetRegistry conflicts, and what can be done about them', (): void => {
+  it('should name the set that can be switched off, when only one can', (): void => {
+    const { sets } = setUp();
+
+    sets.register(
+      new RuleSet('plain', { supersedes: ['a'] }, 'b'),
+      new RuleSet('pick', { exclusive: true, supersedes: ['a'] }, 'c', 'd')
+    );
+
+    expect(problems(sets)).to.eql([
+      { kind: 'conflict', ids: ['plain', 'pick'], blocking: true },
+    ]);
+    expect(sets.validate()[0].message).to.match(/switch 'plain' off/);
+  });
+
+  it('should say when neither set can be switched off', (): void => {
+    const { sets } = setUp();
+
+    sets.register(
+      new RuleSet('pick', { exclusive: true, supersedes: ['a'] }, 'b', 'c'),
+      new RuleSet(
+        'heading',
+        { supersedes: ['a'] },
+        new RuleSet('inner', { exclusive: true }, 'd')
+      )
+    );
+
+    expect(problems(sets)).to.eql([
+      { kind: 'conflict', ids: ['pick', 'heading'], blocking: true },
+    ]);
+    expect(sets.validate()[0].message).to.match(/neither can be switched off/);
+    expect(sets.validate()[0].message).to.not.match(/switch one/);
+  });
+});
+
+describe('RuleSetRegistry and rules arriving late', (): void => {
+  it('should take time that grows with the rules arriving beneath a superseding set, not with its square', (): void => {
+    const asked = (length: number): number => {
+      const rules = new RuleRegistry(),
+        sets = new RuleSetRegistry(rules),
+        ids = Array.from({ length }, (_, index): string => `rule-${index}`),
+        getById = rules.getById.bind(rules);
+
+      sets.register(
+        new RuleSet(
+          'parent',
+          new RuleSet('enhanced', { supersedes: ['old'] }, ...ids),
+          new RuleSet('pick', { exclusive: true }, 'chosen', 'other')
+        )
+      );
+
+      let count = 0;
+
+      rules.getById = (id: string): Rule | null => {
+        count++;
+
+        return getById(id);
+      };
+
+      rules.register(...ids.map(named));
+      sets.dispose();
+
+      return count;
+    };
+
+    // Four times the rules, about four times the asking; worked out again for each rule, it is sixteen times.
+    expect(asked(400)).to.be.below(asked(100) * 5);
+  });
+
+  it('should still bring a superseding set into force when its first rule arrives, and not again', (): void => {
+    const rules = new RuleRegistry(),
+      sets = new RuleSetRegistry(rules);
+
+    sets.register(new RuleSet('enhanced', { supersedes: ['old'] }, 'x', 'y'));
+    rules.register(named('old'));
+
+    expect(rules.process(Example)).to.eql(['old']);
+
+    rules.register(named('x'));
+
+    expect(rules.process(Example)).to.eql(['x']);
+
+    rules.register(named('y'));
+
+    expect(rules.process(Example)).to.eql(['x', 'y']);
+    consistent(sets);
+  });
+});
+
+describe('RuleSetRegistry declarations, kept apart from the merged set', (): void => {
+  it('should refuse to register or unregister a merged set', (): void => {
+    const { sets } = setUp();
+
+    sets.register(new RuleSet('set', { enabled: false }, 'a'));
+    sets.extend('set', 'b');
+
+    const view = sets.get('set')!;
+
+    expect((): void => sets.unregister(view)).to.throw(RuleSetError);
+    expect((): void => sets.register(view)).to.throw(RuleSetError);
+    expect((): void => sets.register(new RuleSet('outer', view))).to.throw(
+      RuleSetError
+    );
+    expect(sets.declarations('set')).to.have.length(2);
+    expect(sets.get('outer')).to.be.null;
+  });
+
+  it('should not count an `extend` whose members have since been taken out', (): void => {
+    const { sets } = setUp();
+
+    sets.register(new RuleSet('pick', { exclusive: true }, 'a', 'b'));
+    sets.extend('pick', 'c');
+
+    expect(problems(sets)).to.eql([
+      { kind: 'no-default', ids: ['pick'], blocking: true },
+    ]);
+
+    sets.declarations('pick')[1].remove('c');
+
+    expect(sets.validate()).to.eql([]);
+  });
+
+  it('should count `extend` once for each call, and its declaration not again', (): void => {
+    const { sets } = setUp();
+
+    sets.register(new RuleSet('pick', { exclusive: true }));
+    sets.extend('pick', 'a', 'b');
+
+    expect(sets.validate()).to.eql([]);
+  });
+
+  it('should not take a default that is none of the members as stated, where load order would decide', (): void => {
+    const { sets } = setUp();
+
+    sets.register(
+      new RuleSet('pick', { exclusive: true }, 'a', 'b'),
+      new RuleSet('pick', { exclusive: true, default: 'z' }, 'c')
+    );
+
+    expect(problems(sets)).to.eql([
+      { kind: 'unknown-member', ids: ['pick', 'z'], blocking: false },
+      { kind: 'no-default', ids: ['pick'], blocking: true },
+    ]);
+  });
+
+  it('should forget a choice of a member that went with a declaration taken out', (): void => {
+    const { sets } = setUp(),
+      later = new RuleSet('pick', 'c');
+
+    sets.register(
+      new RuleSet('pick', { exclusive: true, default: 'a' }, 'a', 'b'),
+      later
+    );
+    sets.choose('pick', 'c');
+    sets.unregister(later);
+
+    expect(sets.chosen('pick')).to.equal('a');
+
+    sets.register(later);
+
+    // Back, but not chosen again by surprise.
+    expect(sets.chosen('pick')).to.equal('a');
   });
 });

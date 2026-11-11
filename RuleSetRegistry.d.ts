@@ -68,9 +68,12 @@ export type RuleSetDescription = {
    */
   state: RuleSetState;
   /**
-   * `false` beneath a member of a choice that is not the one chosen, and for
-   * what is superseded and beneath it: what is there keeps its setting, and
-   * none of it runs.
+   * Whether the path to this node is live: `false` beneath a member of a
+   * choice that is not the one chosen, for what is superseded, and beneath a
+   * superseded set (except what the superseding set holds through a live path
+   * itself, which has an active node there). What is not active keeps its
+   * setting. A rule runs exactly when it is registered, switched on, and at
+   * least one of its nodes is active.
    */
   active: boolean;
   /** A set or choice: the ids it supersedes, as it declares them. */
@@ -122,8 +125,9 @@ export interface IRuleSetRegistry {
  * `supersedes` rules or sets is in force when some path to it is active and
  * at least one registered rule beneath it, through the chosen members of any
  * choice, is switched on (a replacement that has not loaded replaces
- * nothing); and while it is, nothing it supersedes runs, except what is
- * beneath the set itself. A set it names means every rule beneath that set,
+ * nothing); and while it is, nothing it supersedes runs, except what the set
+ * itself holds through a live path (through the chosen member of any choice
+ * beneath it). A set it names means every rule beneath that set,
  * choices and all, and it carries through: a set in force also supersedes
  * what the sets it names supersede, and so on, however those sets are
  * switched. What is superseded keeps its setting, as
@@ -174,6 +178,10 @@ export interface IRuleSetRegistry {
  * no sets, it switches nothing.)
  */
 export declare class RuleSetRegistry implements IRuleSetRegistry {
+  /** Each rule id, and the superseding sets that hold it through a live path: worked out again after each apply. */
+  private _holdersOf;
+  /** The superseding sets in force as last worked out. */
+  private _inForceNow;
   private _cache;
   private _chosen;
   /** The rules that start off, worked out when first asked after the tree changes. */
@@ -181,7 +189,7 @@ export declare class RuleSetRegistry implements IRuleSetRegistry {
   private _effective;
   /** This registry's own declaration of each set `extend` was given members for. */
   private _extensions;
-  /** How many calls to `extend` gave each set members. */
+  /** The members each call to `extend` gave each set, by id. */
   private _extended;
   private _rules;
   private _sets;
@@ -217,8 +225,14 @@ export declare class RuleSetRegistry implements IRuleSetRegistry {
   entries(): RuleSet[];
   /**
    * The set registered as `id`: its declaration, when there is one, or else a
-   * new `RuleSet` that says what all of them say together, made afresh each
-   * time and switching nothing if changed. `declarations(id)` gives each.
+   * `RuleSet` that says what all of them say together. That one is the same
+   * object until anything about the set changes, and throws if `add` or
+   * `remove` is called on it: add with `extend`, or through a declaration.
+   * Nor does a listener `subscribe`d to it hear of later changes: subscribe to
+   * a declaration. `declarations(id)` gives each.
+   *
+   * Within a declaration's own listener, the registry may not have caught up
+   * with the change yet: it hears of it as one listener among the others.
    */
   get(id: string): RuleSet | null;
   /** Each declaration of the set `id`, in the order registered. */
@@ -303,6 +317,8 @@ export declare class RuleSetRegistry implements IRuleSetRegistry {
    */
   validate(): RuleSetProblem[];
   private _validate;
+  /** A merged set is no declaration: registering it, or taking it out, would mean nothing. */
+  private _refuseView;
   private _adopt;
   private _adoptMembers;
   /** A member that has gone is no longer a choice to remember: added back, it is not chosen again by surprise. */
@@ -338,6 +354,12 @@ export declare class RuleSetRegistry implements IRuleSetRegistry {
    */
   private _beneath;
   /**
+   * Every rule, and every set, beneath `id` through live paths only: through
+   * the chosen member of any choice, as whether a set is in force is worked
+   * out. What a set exempts from its own superseding.
+   */
+  private _live;
+  /**
    * `work`, with what `_beneath` and `_reach` find kept until it is done:
    * nothing changes the tree meanwhile, and a long chain of sets superseding
    * one another would otherwise be walked again for each.
@@ -346,9 +368,10 @@ export declare class RuleSetRegistry implements IRuleSetRegistry {
   /**
    * What a set supersedes, carried through: what it names, everything beneath
    * those, and what every set among them supersedes in turn, however those
-   * sets are switched; except what is beneath the set itself. So a set can
-   * take the place of the whole of another while keeping one of its rules, by
-   * holding that rule too.
+   * sets are switched; except what the set itself holds through a live path
+   * (see `_live`). So a set can take the place of the whole of another while
+   * keeping one of its rules, by holding that rule too; and a rule it holds as
+   * an alternative not chosen is superseded with the rest.
    */
   private _reach;
   /**
@@ -364,6 +387,8 @@ export declare class RuleSetRegistry implements IRuleSetRegistry {
    * By the settings alone: see the class comment.
    */
   private _inForce;
+  /** Each rule id, and the superseding sets that hold it through a live path. */
+  private _holders;
   /** What is superseded just now, rules and sets, each by the sets in force that supersede it. */
   private _supersession;
   private _apply;
