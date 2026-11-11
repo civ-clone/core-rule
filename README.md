@@ -17,10 +17,12 @@ const ruleSets = RuleSetRegistry.of(rules);
 ruleSets.register(
   // A plain set: its rules are switched on or off together.
   new RuleSet('my-plugin:obsolescence', 'my-plugin:build/obsolete/a', 'my-plugin:build/obsolete/b'),
-  // A choice: exactly one member is on, the first until another is chosen.
-  new RuleSet('my-plugin:settlers', { exclusive: true }, 'my-plugin:settlers/original', 'my-plugin:settlers/enhanced'),
+  // A choice: exactly one member is on, its default (or the first) until another is chosen.
+  new RuleSet('my-plugin:settlers', { exclusive: true, default: 'my-plugin:settlers/original' }, 'my-plugin:settlers/original', 'my-plugin:settlers/enhanced'),
   // A set that starts off.
-  new RuleSet('my-plugin:extras', { enabled: false }, 'my-plugin:extra/a')
+  new RuleSet('my-plugin:extras', { enabled: false }, 'my-plugin:extra/a'),
+  // A set that takes the place of another package's rule while it is in force.
+  new RuleSet('my-plugin:hydro-plant', { supersedes: ['civ1-city-improvement:city/build/hydro-plant-site'] }, 'my-plugin:city/build/hydro-plant-site')
 );
 
 ruleSets.set('my-plugin:obsolescence', false);
@@ -29,7 +31,10 @@ ruleSets.choose('my-plugin:settlers', 'my-plugin:settlers/enhanced');
 
 - **Sets can hold sets.** Switching a set reaches every rule beneath it; `state(id)` is `'on'`, `'off'` or `'mixed'`, for a three-state checkbox. Switching a set does not reach into a choice beneath it.
 - **It only switches off, and only switches back on what it switched off.** A rule that play has disabled for its own reasons is left as it is.
-- **Sets can be added to.** `set.add(...)`, or `ruleSets.extend(id, ...members)` from a package that does not hold the set, which works whether or not the set has been registered yet.
-- **Order of loading does not matter.** A set can name rules, and sets, that are registered later; a rule that should be off is switched off as it is registered.
-- **`check()`** throws for a rule id nothing registered, an `extend` whose set never arrived, and a set inside itself. Call it once every package is loaded.
+- **A set belongs to no package.** Any package may declare a set under an id, and every declaration of an id is one set: the members of all of them, in the order they were registered, and what each supersedes. An option (`exclusive`, `enabled`, `default`) left out is no opinion; two declarations that state one differently are a problem (below), and until it is settled the first stated stands. No declaration is changed: `get(id)` gives the declaration when there is one and otherwise a new `RuleSet` saying what they say together, and `declarations(id)` gives each. `unregister(set)` takes out that declaration only.
+- **Sets can be added to.** `set.add(...)` by the package that made it; from any other, declare the set again with the new members, or `ruleSets.extend(id, ...members)`, which is shorthand for that.
+- **Superseding.** A set with `{ supersedes: [...] }` names rules, or sets (meaning every rule beneath them, choices and all), that do not run while it is in force: while it is not beneath an alternative that isn't chosen, and at least one rule beneath it is switched on. It carries through: a set in force also supersedes what the sets it names supersede, however those are switched. A superseded rule keeps its setting, and `describe()` says what supersedes it (`supersededBy`) and what each set supersedes (`supersedes`). Nothing of this is saved: it is worked out from the sets.
+- **Order of loading does not matter.** A set can name rules, and sets, that are registered later; a rule that should be off, superseded ones included, is switched off as it is registered.
+- **`validate()`** gives every problem as data, `{ kind, ids, message, blocking }`, for a setup window to show; call it once every package is loaded. These block a game starting: `conflict` (two sets in force supersede the same rule and neither supersedes the other: one must be switched off), `cycle` (a set inside itself, or superseding itself through others), `duplicate-id` (a set's id is also a rule's), `option-conflict` and `no-default` (a choice with members from more than one declaration and no stated `default`, so its default would depend on load order). These are only shown, and whatever they name is switched as usual if it arrives: `unknown-member` (a set names an id that is neither a rule nor a set, or a choice's `default` is none of its members) and `unknown-superseded`.
+- **`check()`** throws for the first blocking problem, for a host with nobody to show them to.
 - **`choices()` and `restore(choices)`** give and take what differs from the defaults, for a save. **`describe()`** gives the tree for a UI.

@@ -1,13 +1,10 @@
-import {
-  RuleRegistry,
-  UnknownRuleError,
-  instance as ruleRegistryInstance,
-} from './RuleRegistry';
+import { RuleRegistry, instance as ruleRegistryInstance } from './RuleRegistry';
 import {
   RuleSet,
   RuleSetEntry,
   RuleSetError,
   RuleSetMember,
+  RuleSetOptions,
   idOf,
 } from './RuleSet';
 import Rule from './Rule';
@@ -19,8 +16,64 @@ const registries: WeakMap<RuleRegistry, RuleSetRegistry> = new WeakMap();
 export class UnknownRuleSetError extends RuleSetError {}
 export class DuplicateRuleSetIdError extends RuleSetError {}
 export class RuleSetCycleError extends RuleSetError {}
+export class RuleSetConflictError extends RuleSetError {}
+export class RuleSetOptionConflictError extends RuleSetError {}
+export class RuleSetNoDefaultError extends RuleSetError {}
 
 export type RuleSetState = 'on' | 'off' | 'mixed';
+
+/**
+ * What can be wrong with a game's sets (see `validate()`). These stop a game
+ * starting (`blocking`):
+ *
+ * - `conflict`: two sets in force supersede the same rule, and neither
+ *   supersedes the other. One has to be switched off.
+ * - `cycle`: a set inside itself, or superseding itself through others.
+ * - `duplicate-id`: a set's id is also a rule's.
+ * - `option-conflict`: two declarations of a set state an option differently.
+ *   Until it is settled, the first stated stands.
+ * - `no-default`: a choice whose members come from more than one declaration,
+ *   none of which states its `default`, so its default would depend on the
+ *   order the packages load in.
+ *
+ * These are only shown, since the id may simply belong to a package that is
+ * not loaded: what it names is left out, and switched as usual if it arrives.
+ *
+ * - `unknown-member`: a set names an id that is neither a rule nor a set, or
+ *   a choice's `default` is none of its members.
+ * - `unknown-superseded`: a set supersedes an id that is neither.
+ */
+export type RuleSetProblemKind =
+  | 'conflict'
+  | 'cycle'
+  | 'duplicate-id'
+  | 'option-conflict'
+  | 'no-default'
+  | 'unknown-member'
+  | 'unknown-superseded';
+
+const blocking: { [kind in RuleSetProblemKind]: boolean } = {
+  conflict: true,
+  cycle: true,
+  'duplicate-id': true,
+  'option-conflict': true,
+  'no-default': true,
+  'unknown-member': false,
+  'unknown-superseded': false,
+};
+
+/**
+ * One problem, as data for a UI to show. `ids` are the sets and rules
+ * involved, the set first where there is one; `message` says it for a person;
+ * `blocking` is whether a game may start while it stands, the same for every
+ * host.
+ */
+export type RuleSetProblem = {
+  kind: RuleSetProblemKind;
+  ids: string[];
+  message: string;
+  blocking: boolean;
+};
 
 /**
  * One thing chosen: a rule or a plain set switched on or off (`boolean`), or
@@ -39,10 +92,15 @@ export type RuleSetDescription = {
    */
   state: RuleSetState;
   /**
-   * `false` beneath a member of a choice that is not the one chosen: what is
-   * there keeps its setting, and none of it runs.
+   * `false` beneath a member of a choice that is not the one chosen, and for
+   * what is superseded and beneath it: what is there keeps its setting, and
+   * none of it runs.
    */
   active: boolean;
+  /** A set or choice: the ids it supersedes, as it declares them. */
+  supersedes?: string[];
+  /** Superseded just now: the sets in force that supersede it. */
+  supersededBy?: string[];
   /**
    * Whether `set(id, …)` has anything to switch: a rule always, a choice
    * never, and a set when it reaches at least one rule without passing through
@@ -59,6 +117,7 @@ export interface IRuleSetRegistry {
   choices(): RuleSetChoice[];
   choose(id: string, member: string): void;
   chosen(id: string): string | null;
+  declarations(id: string): RuleSet[];
   describe(): RuleSetDescription[];
   dispose(): void;
   entries(): RuleSet[];
@@ -72,6 +131,147 @@ export interface IRuleSetRegistry {
   set(id: string, on: boolean): void;
   state(id: string): RuleSetState;
   unregister(...sets: RuleSet[]): void;
+  validate(): RuleSetProblem[];
+}
+
+/**
+ * A set as the registry sees it: every declaration of its id taken together,
+ * in the order they arrived (civ-clone/web-renderer#954). Worked out from them
+ * each time it is asked, so a declaration that changes is seen at once, and
+ * never written back to them: each is its package's own object, and may be in
+ * another game's registry too.
+ */
+class MergedRuleSet {
+  private _declarations: RuleSet[] = [];
+  private _id: string;
+
+  constructor(id: string) {
+    this._id = id;
+  }
+
+  id(): string {
+    return this._id;
+  }
+
+  declarations(): RuleSet[] {
+    return [...this._declarations];
+  }
+
+  holds(declaration: RuleSet): boolean {
+    return this._declarations.includes(declaration);
+  }
+
+  add(declaration: RuleSet): void {
+    this._declarations.push(declaration);
+  }
+
+  remove(declaration: RuleSet): void {
+    this._declarations = this._declarations.filter(
+      (other) => other !== declaration
+    );
+  }
+
+  /** Each declaration's in turn, a repeat left out: a set given as itself takes the place of its id, as in `add`. */
+  members(): RuleSetMember[] {
+    const members: RuleSetMember[] = [],
+      at = new Map<string, number>();
+
+    this._declarations.forEach((declaration) =>
+      declaration.members().forEach((member) => {
+        const index = at.get(idOf(member));
+
+        if (index === undefined) {
+          at.set(idOf(member), members.length);
+          members.push(member);
+
+          return;
+        }
+
+        if (member instanceof RuleSet && !(members[index] instanceof RuleSet)) {
+          members[index] = member;
+        }
+      })
+    );
+
+    return members;
+  }
+
+  memberIds(): string[] {
+    return this.members().map(idOf);
+  }
+
+  has(member: RuleSetEntry): boolean {
+    return this.memberIds().includes(idOf(member));
+  }
+
+  /** The first value stated for an option, if any declaration states one. */
+  stated<K extends keyof RuleSetOptions>(key: K): RuleSetOptions[K] {
+    for (const declaration of this._declarations) {
+      const value = declaration.stated()[key];
+
+      if (value !== undefined) {
+        return value;
+      }
+    }
+
+    return undefined;
+  }
+
+  exclusive(): boolean {
+    return this.stated('exclusive') ?? false;
+  }
+
+  enabledByDefault(): boolean {
+    return this.stated('enabled') ?? true;
+  }
+
+  supersedes(): string[] {
+    return [
+      ...new Set(
+        this._declarations.flatMap((declaration) => declaration.supersedes())
+      ),
+    ];
+  }
+
+  /** A choice's default: the one stated, if it is a member, or else the first. */
+  defaultMember(): string | null {
+    const members = this.memberIds(),
+      stated = this.stated('default');
+
+    if (stated !== undefined && members.includes(stated)) {
+      return stated;
+    }
+
+    return members[0] ?? null;
+  }
+
+  /**
+   * The set as one `RuleSet`: the declaration itself when there is only one,
+   * and otherwise a new one made to say what they say together, which changes
+   * nothing if it is changed.
+   */
+  toRuleSet(): RuleSet {
+    if (this._declarations.length === 1) {
+      return this._declarations[0];
+    }
+
+    const stated = this.stated('default'),
+      supersedes = this.supersedes(),
+      options: RuleSetOptions = this.exclusive()
+        ? {
+            exclusive: true,
+            ...(stated !== undefined && this.memberIds().includes(stated)
+              ? { default: stated }
+              : {}),
+          }
+        : { enabled: this.enabledByDefault() };
+
+    if (supersedes.length > 0) {
+      options.supersedes = supersedes;
+    }
+
+    return new RuleSet(this._id, options, ...this.members());
+  }
 }
 
 /**
@@ -83,6 +283,18 @@ export interface IRuleSetRegistry {
  * active unless it passes through a member of a choice that is not the chosen
  * one. So a rule shared by two alternatives runs whichever is chosen, and
  * choosing an alternative back gives its rules the settings they had.
+ *
+ * **Unless it is superseded** (civ-clone/web-renderer#954). A set that
+ * `supersedes` rules or sets is in force when some path to it is active and
+ * at least one rule beneath it, through the chosen members of any choice, is
+ * switched on; and while it is, nothing it supersedes runs. A set it names
+ * means every rule beneath that set, choices and all, and it carries through:
+ * a set in force also supersedes what the sets it names supersede, and so on,
+ * however those sets are switched. What is superseded keeps its setting, as
+ * what is beneath an alternative not chosen does, and none of it is saved:
+ * it is worked out from the sets, like the rest. Whether a set is in force
+ * goes by the settings alone, never by whether it is itself superseded, so
+ * the answer never depends on itself.
  *
  * **Two kinds of switching, kept apart:**
  *
@@ -105,8 +317,13 @@ export interface IRuleSetRegistry {
  * is often registered before the rules it names. The registry listens to the
  * `RuleRegistry`, so an alternative that is not the chosen one is off from the
  * moment it is registered, and no host has to remember to apply anything.
- * `check()` is for the host to call once every package is in: until then a
- * rule id nothing has registered is not an error, and after it is.
+ * `validate()` and `check()` are for the host once every package is in.
+ *
+ * **A set belongs to no package** (civ-clone/web-renderer#954). Any package
+ * may declare a set under an id, and every declaration of an id is one set:
+ * their members together, in the order they arrived, and their options where
+ * they state them (see `validate()` for when they disagree). Each declaration
+ * is left as its package made it.
  *
  * **One registry to a `RuleRegistry`,** found with `RuleSetRegistry.of(rules)`,
  * which makes it the first time. Two would each switch the same rules, and
@@ -121,9 +338,10 @@ export class RuleSetRegistry implements IRuleSetRegistry {
   /** The rules that start off, worked out when first asked after the tree changes. */
   private _defaultOff: Set<string> | null = null;
   private _effective: Map<string, boolean> = new Map();
-  private _pending: Map<string, RuleSetMember[]> = new Map();
+  /** This registry's own declaration of each set `extend` was given members for. */
+  private _extensions: Map<string, RuleSet> = new Map();
   private _rules: RuleRegistry;
-  private _sets: Map<string, RuleSet> = new Map();
+  private _sets: Map<string, MergedRuleSet> = new Map();
   private _stopListening: () => void;
   private _subscriptions: Map<RuleSet, () => void> = new Map();
   /** The rules this has switched off, each by id: the only ones it will switch back on. */
@@ -188,7 +406,7 @@ export class RuleSetRegistry implements IRuleSetRegistry {
     this._subscriptions.forEach((stop) => stop());
     this._subscriptions.clear();
     this._sets.clear();
-    this._pending.clear();
+    this._extensions.clear();
     this._values.clear();
     this._setAt.clear();
     this._chosen.clear();
@@ -201,60 +419,40 @@ export class RuleSetRegistry implements IRuleSetRegistry {
     this._switchedOff.clear();
   }
 
-  /** Every set, in the order registered, whether or not another holds it. */
+  /**
+   * Every set, in the order its id was first registered, whether or not
+   * another holds it. Each is as `get` gives it.
+   */
   entries(): RuleSet[] {
-    return [...this._sets.values()];
+    return [...this._sets.values()].map((set) => set.toRuleSet());
   }
 
+  /**
+   * The set registered as `id`: its declaration, when there is one, or else a
+   * new `RuleSet` that says what all of them say together, made afresh each
+   * time and switching nothing if changed. `declarations(id)` gives each.
+   */
   get(id: string): RuleSet | null {
-    return this._sets.get(id) ?? null;
+    return this._sets.get(id)?.toRuleSet() ?? null;
+  }
+
+  /** Each declaration of the set `id`, in the order registered. */
+  declarations(id: string): RuleSet[] {
+    return this._sets.get(id)?.declarations() ?? [];
   }
 
   /** The sets no other set holds: where a UI starts drawing. */
   roots(): RuleSet[] {
-    const held = new Set<string>();
-
-    this._sets.forEach((set) =>
-      set.memberIds().forEach((member) => held.add(member))
-    );
-
-    return this.entries().filter((set) => !held.has(set.id()));
+    return this._roots().map((set) => set.toRuleSet());
   }
 
   /**
    * A set, and every set given to it as a member, and theirs.
    *
-   * Two sets under one id are refused, as two rules under one id are: one of
-   * them could never be switched. All of them are looked at before any is
-   * taken in, so a refusal leaves the registry as it was.
+   * One under an id that is registered already is another declaration of
+   * that set, and joins it: see the class comment.
    */
   register(...sets: RuleSet[]): void {
-    const incoming = new Map<string, RuleSet>(),
-      look = (set: RuleSet): void => {
-        const known = incoming.get(set.id()) ?? this._sets.get(set.id());
-
-        if (known === set) {
-          return;
-        }
-
-        if (known) {
-          throw this._duplicate(set.id());
-        }
-
-        incoming.set(set.id(), set);
-
-        // Its own members, and those waiting for it from `extend`, which it is given as it is taken in.
-        [...set.members(), ...(this._pending.get(set.id()) ?? [])].forEach(
-          (member) => {
-            if (member instanceof RuleSet) {
-              look(member);
-            }
-          }
-        );
-      };
-
-    sets.forEach(look);
-
     try {
       sets.forEach((set) => this._adopt(set));
     } finally {
@@ -263,22 +461,27 @@ export class RuleSetRegistry implements IRuleSetRegistry {
   }
 
   /**
-   * Taken out, along with the sets given to it as members that nothing else
-   * registered holds.
+   * Taken out, each declaration given, along with the sets given to it as
+   * members that nothing else registered holds. The set lasts while any
+   * declaration of its id does.
    *
    * No other set is changed: sets are their package's own objects, and may be
    * in another game's registry too. A set that names this one by id keeps the
-   * id, which `check()` then reports unless a set is registered under it
+   * id, which `validate()` then reports unless a set is registered under it
    * again, as when one is swapped for another. A registered set that was
    * *given* this one holds the set itself, and would put it straight back, so
    * that is refused: take it out of there first.
    */
   unregister(...sets: RuleSet[]): void {
+    const declarations = [...this._sets.values()].flatMap((set) =>
+      set.declarations()
+    );
+
     sets.forEach((set) => {
-      const holder = this.entries().find(
+      const holder = declarations.find(
         (other) =>
           !sets.includes(other) &&
-          this._sets.get(set.id()) === set &&
+          declarations.includes(set) &&
           other.members().includes(set)
       );
 
@@ -294,14 +497,26 @@ export class RuleSetRegistry implements IRuleSetRegistry {
     //  names, by the set or by its id: so it does not matter which of two sets holding a third is named first.
     const orphans: RuleSet[] = [],
       drop = (set: RuleSet): void => {
-        if (this._sets.get(set.id()) !== set) {
+        const merged = this._sets.get(set.id());
+
+        if (!merged?.holds(set)) {
           return;
         }
 
-        this._sets.delete(set.id());
-        this._chosen.delete(set.id());
+        merged.remove(set);
         this._subscriptions.get(set)?.();
         this._subscriptions.delete(set);
+
+        if (this._extensions.get(set.id()) === set) {
+          this._extensions.delete(set.id());
+        }
+
+        if (merged.declarations().length === 0) {
+          this._sets.delete(set.id());
+          this._chosen.delete(set.id());
+        } else {
+          this._forgetChosen(merged);
+        }
 
         set.members().forEach((member) => {
           if (member instanceof RuleSet) {
@@ -315,7 +530,7 @@ export class RuleSetRegistry implements IRuleSetRegistry {
     while (orphans.length > 0) {
       const orphan = orphans.shift()!;
 
-      if (!this.entries().some((other) => other.has(orphan))) {
+      if (![...this._sets.values()].some((other) => other.has(orphan))) {
         drop(orphan);
       }
     }
@@ -325,34 +540,25 @@ export class RuleSetRegistry implements IRuleSetRegistry {
   }
 
   /**
-   * Add members to the set registered as `id`, now or when it arrives.
-   *
-   * This is how a plugin adds its rules to another package's set without
-   * importing it, and without caring which of the two loads first. `check()`
-   * reports a set that never arrived.
+   * Add members to the set `id`: shorthand for declaring the set with them and
+   * no options, so the set is there from now on, whether or not another
+   * package declares it too, and whichever loads first.
    */
   extend(id: string, ...members: RuleSetEntry[]): void {
-    const set = this._sets.get(id);
+    const known = this._extensions.get(id);
 
-    if (set) {
-      set.add(...members);
+    if (known) {
+      // Tells the subscription, which adopts and applies.
+      known.add(...members);
 
       return;
     }
 
-    // Looked at now, as `add` would: a member that can't be one should fail here, where it was given, and not in
-    //  whichever package registers the set later.
-    const held = members.map((member): RuleSetMember => {
-      const memberId = idOf(member);
+    // Made whole before it is registered: a member that can't be one fails here, where it was given.
+    const declaration = new RuleSet(id, ...members);
 
-      if (memberId === id) {
-        throw new RuleSetError(`RuleSet '${id}' cannot be a member of itself.`);
-      }
-
-      return member instanceof RuleSet ? member : memberId;
-    });
-
-    this._pending.set(id, [...(this._pending.get(id) ?? []), ...held]);
+    this._extensions.set(id, declaration);
+    this.register(declaration);
   }
 
   /**
@@ -396,7 +602,7 @@ export class RuleSetRegistry implements IRuleSetRegistry {
     return leaves.some((leaf) => this._value(leaf)) ? 'mixed' : 'off';
   }
 
-  /** The member of a choice that is on: the one picked, or else the first. */
+  /** The member of a choice that is on: the one picked, or else its default. */
   chosen(id: string): string | null {
     const set = this._requireSet(id);
 
@@ -448,7 +654,7 @@ export class RuleSetRegistry implements IRuleSetRegistry {
         if (set.exclusive()) {
           const chosen = this._chosenOf(set);
 
-          if (chosen !== null && chosen !== set.memberIds()[0]) {
+          if (chosen !== null && chosen !== set.defaultMember()) {
             say(id, chosen);
           }
 
@@ -544,98 +750,163 @@ export class RuleSetRegistry implements IRuleSetRegistry {
 
   /** The whole tree, from the sets no other holds, for a UI to draw. */
   describe(): RuleSetDescription[] {
-    const describe = (
-      id: string,
-      active: boolean,
-      path: Set<string>
-    ): RuleSetDescription => {
-      const set = this._sets.get(id);
+    const superseded = this._supersession(),
+      // Only said where there is something to say, so a tree with nothing superseded is described as it always was.
+      supersession = (
+        id: string
+      ): Pick<RuleSetDescription, 'supersedes' | 'supersededBy'> => {
+        const set = this._sets.get(id),
+          by = superseded.get(id);
 
-      if (!set) {
         return {
-          id,
-          kind: 'rule',
-          state: this._value(id) ? 'on' : 'off',
-          active,
-          switchable: true,
-          members: [],
+          ...(set && set.supersedes().length > 0
+            ? { supersedes: set.supersedes() }
+            : {}),
+          ...(by ? { supersededBy: by } : {}),
         };
-      }
+      },
+      describe = (
+        id: string,
+        onPath: boolean,
+        path: Set<string>
+      ): RuleSetDescription => {
+        const set = this._sets.get(id),
+          active = onPath && !superseded.has(id);
 
-      const chosen = set.exclusive() ? this._chosenOf(set) : null,
-        inside = new Set(path).add(id),
-        members = set
-          .memberIds()
-          .filter((member) => !inside.has(member))
-          .map((member) =>
-            describe(
-              member,
-              active && (!set.exclusive() || member === chosen),
-              inside
-            )
-          );
-
-      return set.exclusive()
-        ? {
+        if (!set) {
+          return {
             id,
-            kind: 'choice',
-            state: 'on',
+            kind: 'rule',
+            state: this._value(id) ? 'on' : 'off',
             active,
-            switchable: false,
-            chosen,
-            members,
-          }
-        : {
-            id,
-            kind: 'set',
-            state: this.state(id),
-            active,
-            switchable: this._leaves(id).length > 0,
-            members,
+            switchable: true,
+            ...supersession(id),
+            members: [],
           };
-    };
+        }
+
+        const chosen = set.exclusive() ? this._chosenOf(set) : null,
+          inside = new Set(path).add(id),
+          members = set
+            .memberIds()
+            .filter((member) => !inside.has(member))
+            .map((member) =>
+              describe(
+                member,
+                active && (!set.exclusive() || member === chosen),
+                inside
+              )
+            );
+
+        return set.exclusive()
+          ? {
+              id,
+              kind: 'choice',
+              state: 'on',
+              active,
+              switchable: false,
+              chosen,
+              ...supersession(id),
+              members,
+            }
+          : {
+              id,
+              kind: 'set',
+              state: this.state(id),
+              active,
+              switchable: this._leaves(id).length > 0,
+              ...supersession(id),
+              members,
+            };
+      };
 
     return this._tops().map((top) => describe(top.id(), true, new Set()));
   }
 
   /**
-   * For the host, once every package has loaded: throws for a rule id that
-   * nothing registered, a set `extend` was given members for that never
-   * arrived, a set under the id of a rule, and a set that is inside itself.
-   *
-   * Until then none of those is an error, since the package that settles it
-   * may simply not have loaded yet. After it, each is a typo or a missing
-   * package, and should stop the game starting and not quietly leave a rule
-   * running.
+   * For the host, once every package has loaded: throws for the first of the
+   * problems `validate()` finds that stops a game starting, for a host with
+   * nobody to show them to. One that is only shown does not throw.
    */
   check(): void {
-    if (this._pending.size > 0) {
-      throw new UnknownRuleSetError(
-        `Members were added to rule set(s) that were never registered: ${[
-          ...this._pending.keys(),
-        ]
-          .sort()
-          .join(', ')}.`
-      );
+    const problem = this.validate().find((problem) => problem.blocking);
+
+    if (problem === undefined) {
+      return;
     }
+
+    switch (problem.kind) {
+      case 'duplicate-id':
+        throw new DuplicateRuleSetIdError(problem.message);
+
+      case 'cycle':
+        throw new RuleSetCycleError(problem.message);
+
+      case 'option-conflict':
+        throw new RuleSetOptionConflictError(problem.message);
+
+      case 'no-default':
+        throw new RuleSetNoDefaultError(problem.message);
+
+      default:
+        throw new RuleSetConflictError(problem.message);
+    }
+  }
+
+  /**
+   * Every problem with the sets as they stand, as data, for a setup window to
+   * show before a game starts: see `RuleSetProblemKind`. Empty when there are
+   * none.
+   *
+   * The orphans (`unknown-*`) only mean anything once every package has
+   * loaded, and even then are only shown. A `conflict` is the player's to
+   * settle, by switching one of the two sets off, and goes as soon as they do.
+   */
+  validate(): RuleSetProblem[] {
+    const problems: RuleSetProblem[] = [],
+      said = new Set<string>(),
+      report = (
+        problem: Omit<RuleSetProblem, 'blocking'>,
+        key: string
+      ): void => {
+        if (!said.has(key)) {
+          said.add(key);
+          problems.push({ ...problem, blocking: blocking[problem.kind] });
+        }
+      };
 
     this._sets.forEach((set) => {
       if (this._rules.getById(set.id()) !== null) {
-        throw new DuplicateRuleSetIdError(
-          `'${set.id()}' is the id of a rule set and of a rule. A set that ` +
-            'names it would mean the set, and the rule could not be reached.'
+        report(
+          {
+            kind: 'duplicate-id',
+            ids: [set.id()],
+            message:
+              `'${set.id()}' is the id of a rule set and of a rule. A set that ` +
+              'names it would mean the set, and the rule could not be reached.',
+          },
+          `duplicate-id\n${set.id()}`
         );
       }
     });
 
+    // Every path, as `check()` has always walked them, so that the first problem found is the one it always threw.
     const walk = (id: string, path: string[]): void => {
       const set = this._sets.get(id);
 
       if (!set) {
+        const parent = path[path.length - 1];
+
         if (this._rules.getById(id) === null) {
-          throw new UnknownRuleError(
-            `Rule set '${path[path.length - 1]}' names '${id}', which is ` +
-              'neither a registered rule nor a registered rule set.'
+          report(
+            {
+              kind: 'unknown-member',
+              ids: [parent, id],
+              message:
+                `Rule set '${parent}' names '${id}', which is ` +
+                'neither a registered rule nor a registered rule set.',
+            },
+            `unknown-member\n${parent}\n${id}`
           );
         }
 
@@ -643,48 +914,215 @@ export class RuleSetRegistry implements IRuleSetRegistry {
       }
 
       if (path.includes(id)) {
-        throw new RuleSetCycleError(
-          `Rule set '${id}' is inside itself: ${[...path, id].join(' → ')}.`
+        const loop = path.slice(path.indexOf(id));
+
+        report(
+          {
+            kind: 'cycle',
+            ids: loop,
+            message: `Rule set '${id}' is inside itself: ${[...path, id].join(
+              ' → '
+            )}.`,
+          },
+          `cycle\n${[...loop].sort().join('\n')}`
         );
+
+        return;
       }
 
       set.memberIds().forEach((member) => walk(member, [...path, id]));
     };
 
     this._sets.forEach((set) => walk(set.id(), []));
-  }
 
-  private _duplicate(id: string): DuplicateRuleSetIdError {
-    return new DuplicateRuleSetIdError(
-      `Two rule sets claim the id '${id}'. An id addresses one set, so one ` +
-        'of them could never be switched. To add to a set that exists, use ' +
-        '`extend`.'
+    this._sets.forEach((set) =>
+      set.supersedes().forEach((id) => {
+        if (!this._sets.has(id) && this._rules.getById(id) === null) {
+          report(
+            {
+              kind: 'unknown-superseded',
+              ids: [set.id(), id],
+              message:
+                `Rule set '${set.id()}' supersedes '${id}', which is ` +
+                'neither a registered rule nor a registered rule set.',
+            },
+            `unknown-superseded\n${set.id()}\n${id}`
+          );
+        }
+      })
     );
+
+    this._sets.forEach((set) => {
+      const through = this._supersedesItself(set);
+
+      if (through !== null) {
+        const loop = [set.id(), ...through];
+
+        report(
+          {
+            kind: 'cycle',
+            ids: loop,
+            message:
+              `Rule set '${set.id()}' supersedes itself: ${loop.join(' → ')}` +
+              (through[through.length - 1] === set.id()
+                ? '.'
+                : `, which holds '${set.id()}'.`),
+          },
+          `supersedes\n${[...new Set(loop)].sort().join('\n')}`
+        );
+      }
+    });
+
+    this._sets.forEach((set) => {
+      const declarations = set.declarations();
+
+      (['exclusive', 'enabled', 'default'] as const).forEach((key) => {
+        const values = [
+          ...new Set(
+            declarations
+              .map((declaration) => declaration.stated()[key])
+              .filter((value) => value !== undefined)
+          ),
+        ];
+
+        if (values.length > 1) {
+          report(
+            {
+              kind: 'option-conflict',
+              ids: [set.id()],
+              message:
+                `The declarations of rule set '${set.id()}' disagree on ` +
+                `\`${key}\`: ${values
+                  .map((value) => JSON.stringify(value))
+                  .join(', ')}. Until they agree, the first ` +
+                `(${JSON.stringify(values[0])}) stands.`,
+            },
+            `option-conflict\n${set.id()}\n${key}`
+          );
+        }
+      });
+
+      // Each declaration may be sound alone, and the two together not.
+      if (
+        set.exclusive() &&
+        declarations.some(
+          (declaration) => declaration.stated().enabled === false
+        )
+      ) {
+        report(
+          {
+            kind: 'option-conflict',
+            ids: [set.id()],
+            message:
+              `Rule set '${set.id()}' is declared a choice, and also to ` +
+              'start switched off, but a choice always has one member on.',
+          },
+          `option-conflict\n${set.id()}\nchoice-off`
+        );
+      }
+
+      if (!set.exclusive()) {
+        return;
+      }
+
+      const stated = set.stated('default');
+
+      if (stated === undefined) {
+        if (
+          declarations.filter(
+            (declaration) => declaration.memberIds().length > 0
+          ).length > 1
+        ) {
+          report(
+            {
+              kind: 'no-default',
+              ids: [set.id()],
+              message:
+                `The choice '${set.id()}' has members from more than one ` +
+                'declaration, and none of them states its `default`, so ' +
+                'which is chosen at first would depend on the order they ' +
+                'load in.',
+            },
+            `no-default\n${set.id()}`
+          );
+        }
+
+        return;
+      }
+
+      if (!set.memberIds().includes(stated)) {
+        report(
+          {
+            kind: 'unknown-member',
+            ids: [set.id(), stated],
+            message:
+              `The choice '${set.id()}' has '${stated}' as its default, ` +
+              'which is none of its members: its first member is the ' +
+              'default until it is.',
+          },
+          `unknown-member\n${set.id()}\n${stated}`
+        );
+      }
+    });
+
+    const inForce = this._inForce(),
+      reach = new Map(inForce.map((set) => [set, this._reach(set)]));
+
+    inForce.forEach((first, index) =>
+      inForce.slice(index + 1).forEach((second) => {
+        const firstReach = reach.get(first)!,
+          secondReach = reach.get(second)!,
+          shared = [...firstReach.rules].filter((rule) =>
+            secondReach.rules.has(rule)
+          );
+
+        if (
+          shared.length === 0 ||
+          firstReach.sets.has(second.id()) ||
+          secondReach.sets.has(first.id()) ||
+          this._apart(first.id(), second.id())
+        ) {
+          return;
+        }
+
+        report(
+          {
+            kind: 'conflict',
+            ids: [first.id(), second.id()],
+            message:
+              `Rule sets '${first.id()}' and '${second.id()}' both supersede ` +
+              `${shared.map((rule) => `'${rule}'`).join(', ')}, and neither ` +
+              'supersedes the other: switch one of them off.',
+          },
+          `conflict\n${first.id()}\n${second.id()}`
+        );
+      })
+    );
+
+    return problems;
   }
 
   private _adopt(set: RuleSet): void {
     const existing = this._sets.get(set.id());
 
-    if (existing === set) {
+    if (existing?.holds(set)) {
       return;
     }
 
-    if (existing) {
-      throw this._duplicate(set.id());
-    }
+    const merged = existing ?? new MergedRuleSet(set.id());
 
-    this._sets.set(set.id(), set);
+    merged.add(set);
+    this._sets.set(set.id(), merged);
     this._defaultOff = null;
     this._subscriptions.set(
       set,
       set.subscribe((): void => {
         this._defaultOff = null;
 
-        // A member that has gone is no longer a choice to remember: added back, it is not chosen again by surprise.
-        const chosen = this._chosen.get(set.id());
+        const current = this._sets.get(set.id());
 
-        if (chosen !== undefined && !set.memberIds().includes(chosen)) {
-          this._chosen.delete(set.id());
+        if (current) {
+          this._forgetChosen(current);
         }
 
         try {
@@ -695,16 +1133,12 @@ export class RuleSetRegistry implements IRuleSetRegistry {
       })
     );
 
-    const pending = this._pending.get(set.id());
-
-    if (pending) {
-      this._pending.delete(set.id());
-
-      // Tells the subscription above, which adopts and applies.
-      set.add(...pending);
-    }
-
     this._adoptMembers(set);
+
+    // Only the first declaration of an id can find a setting kept against it.
+    if (existing) {
+      return;
+    }
 
     // Switched before it arrived, through a set that named it by id: until now the id was taken for a rule's, and
     //  the setting was kept against it. It passes to the rules the set switches, except any switched themselves since
@@ -725,29 +1159,24 @@ export class RuleSetRegistry implements IRuleSetRegistry {
     }
   }
 
-  // Each of them tried, whatever becomes of another: one that can't be taken in (its id is taken) must not leave the
-  //  ones after it out, with their rules unswitched. The first refusal is thrown once all have been tried.
   private _adoptMembers(set: RuleSet): void {
-    const errors: unknown[] = [];
-
     set.members().forEach((member) => {
-      if (!(member instanceof RuleSet)) {
-        return;
-      }
-
-      try {
+      if (member instanceof RuleSet) {
         this._adopt(member);
-      } catch (error) {
-        errors.push(error);
       }
     });
+  }
 
-    if (errors.length > 0) {
-      throw errors[0];
+  /** A member that has gone is no longer a choice to remember: added back, it is not chosen again by surprise. */
+  private _forgetChosen(set: MergedRuleSet): void {
+    const chosen = this._chosen.get(set.id());
+
+    if (chosen !== undefined && !set.memberIds().includes(chosen)) {
+      this._chosen.delete(set.id());
     }
   }
 
-  private _requireSet(id: string): RuleSet {
+  private _requireSet(id: string): MergedRuleSet {
     const set = this._sets.get(id);
 
     if (!set) {
@@ -823,15 +1252,25 @@ export class RuleSetRegistry implements IRuleSetRegistry {
     this._chosen.set(id, member);
   }
 
-  private _chosenOf(set: RuleSet): string | null {
-    const members = set.memberIds(),
-      chosen = this._chosen.get(set.id());
+  private _chosenOf(set: MergedRuleSet): string | null {
+    const chosen = this._chosen.get(set.id());
 
-    if (chosen !== undefined && members.includes(chosen)) {
+    if (chosen !== undefined && set.memberIds().includes(chosen)) {
       return chosen;
     }
 
-    return members[0] ?? null;
+    return set.defaultMember();
+  }
+
+  /** The sets no other set holds. */
+  private _roots(): MergedRuleSet[] {
+    const held = new Set<string>();
+
+    this._sets.forEach((set) =>
+      set.memberIds().forEach((member) => held.add(member))
+    );
+
+    return [...this._sets.values()].filter((set) => !held.has(set.id()));
   }
 
   /**
@@ -840,8 +1279,8 @@ export class RuleSetRegistry implements IRuleSetRegistry {
    * itself, which `check()` refuses, but until it has, such a set's rules are
    * still switched, described and saved.
    */
-  private _tops(): RuleSet[] {
-    const tops = this.roots(),
+  private _tops(): MergedRuleSet[] {
+    const tops = this._roots(),
       reached = new Set<string>(),
       reach = (id: string): void => {
         if (reached.has(id)) {
@@ -954,7 +1393,226 @@ export class RuleSetRegistry implements IRuleSetRegistry {
 
     this._tops().forEach((top) => visit(top.id(), true, new Set()));
 
+    // A superseded rule need not be in any set: the rule a set takes the place of is usually another package's, which
+    //  that package never put in one.
+    this._supersession().forEach((by, id) => {
+      if (!this._sets.has(id)) {
+        effective.set(id, false);
+      }
+    });
+
     return effective;
+  }
+
+  /**
+   * Every rule, and every set, beneath `id`, through every member of a choice
+   * and not only the chosen one: what superseding it means.
+   */
+  private _beneath(id: string): { rules: Set<string>; sets: Set<string> } {
+    const rules = new Set<string>(),
+      sets = new Set<string>(),
+      visit = (member: string): void => {
+        const set = this._sets.get(member);
+
+        if (!set) {
+          rules.add(member);
+
+          return;
+        }
+
+        if (sets.has(member)) {
+          return;
+        }
+
+        sets.add(member);
+        set.memberIds().forEach(visit);
+      };
+
+    visit(id);
+
+    return { rules, sets };
+  }
+
+  /**
+   * What a set supersedes, carried through: what it names, everything beneath
+   * those, and what every set among them supersedes in turn, however those
+   * sets are switched.
+   */
+  private _reach(set: MergedRuleSet): {
+    rules: Set<string>;
+    sets: Set<string>;
+  } {
+    const rules = new Set<string>(),
+      sets = new Set<string>(),
+      named = new Set<string>(),
+      queue = set.supersedes();
+
+    while (queue.length > 0) {
+      const id = queue.shift()!;
+
+      if (named.has(id)) {
+        continue;
+      }
+
+      named.add(id);
+
+      const beneath = this._beneath(id);
+
+      beneath.rules.forEach((rule) => rules.add(rule));
+      beneath.sets.forEach((other) => {
+        sets.add(other);
+        queue.push(...this._sets.get(other)!.supersedes());
+      });
+    }
+
+    return { rules, sets };
+  }
+
+  /**
+   * The ids, from what `set` names, by which it comes to supersede itself:
+   * the last of them is the set, or a set that holds it. `null` when it does
+   * not.
+   */
+  private _supersedesItself(set: MergedRuleSet): string[] | null {
+    const from = new Map<string, string | null>(),
+      queue: string[] = [];
+
+    set.supersedes().forEach((id) => {
+      if (!from.has(id)) {
+        from.set(id, null);
+        queue.push(id);
+      }
+    });
+
+    while (queue.length > 0) {
+      const id = queue.shift()!,
+        beneath = this._beneath(id).sets;
+
+      if (beneath.has(set.id())) {
+        const through: string[] = [];
+
+        for (let at: string | null = id; at !== null; at = from.get(at)!) {
+          through.unshift(at);
+        }
+
+        return through;
+      }
+
+      beneath.forEach((other) =>
+        this._sets
+          .get(other)!
+          .supersedes()
+          .forEach((next) => {
+            if (!from.has(next)) {
+              from.set(next, id);
+              queue.push(next);
+            }
+          })
+      );
+    }
+
+    return null;
+  }
+
+  /**
+   * The sets that supersede something and are in force, in the order
+   * registered: some path to the set is active, and at least one rule beneath
+   * it, through the chosen member of any choice, is switched on. By the
+   * settings alone: see the class comment.
+   */
+  private _inForce(): MergedRuleSet[] {
+    const superseding = [...this._sets.values()].filter(
+      (set) => set.supersedes().length > 0
+    );
+
+    // Most games: nothing to walk the tree for.
+    if (superseding.length === 0) {
+      return [];
+    }
+
+    const active = new Set<string>(),
+      reach = (id: string): void => {
+        const set = this._sets.get(id);
+
+        if (!set || active.has(id)) {
+          return;
+        }
+
+        active.add(id);
+
+        const chosen = set.exclusive() ? this._chosenOf(set) : null;
+
+        set
+          .memberIds()
+          .filter((member) => !set.exclusive() || member === chosen)
+          .forEach(reach);
+      },
+      switchedOn = (id: string, path: Set<string>): boolean => {
+        const set = this._sets.get(id);
+
+        if (!set) {
+          return this._value(id);
+        }
+
+        if (path.has(id)) {
+          return false;
+        }
+
+        path.add(id);
+
+        const chosen = set.exclusive() ? this._chosenOf(set) : null,
+          on = set
+            .memberIds()
+            .filter((member) => !set.exclusive() || member === chosen)
+            .some((member) => switchedOn(member, path));
+
+        path.delete(id);
+
+        return on;
+      };
+
+    this._tops().forEach((top) => reach(top.id()));
+
+    return superseding.filter(
+      (set) => active.has(set.id()) && switchedOn(set.id(), new Set())
+    );
+  }
+
+  /** What is superseded just now, rules and sets, each by the sets in force that supersede it. */
+  private _supersession(): Map<string, string[]> {
+    const superseded = new Map<string, string[]>();
+
+    this._inForce().forEach((set) => {
+      const { rules, sets } = this._reach(set);
+
+      [...sets, ...rules].forEach((id) =>
+        superseded.set(id, [...(superseded.get(id) ?? []), set.id()])
+      );
+    });
+
+    return superseded;
+  }
+
+  /**
+   * Whether two sets are beneath different members of one choice, and so
+   * alternatives already: only one of them can be chosen.
+   */
+  private _apart(first: string, second: string): boolean {
+    return [...this._sets.values()].some((set) => {
+      if (!set.exclusive()) {
+        return false;
+      }
+
+      const beneath = set.memberIds().map((member) => this._beneath(member)),
+        holdsFirst = beneath.filter((below) => below.sets.has(first)),
+        holdsSecond = beneath.filter((below) => below.sets.has(second));
+
+      return (
+        holdsFirst.length > 0 &&
+        holdsSecond.length > 0 &&
+        !holdsFirst.some((below) => holdsSecond.includes(below))
+      );
+    });
   }
 
   private _apply(): void {

@@ -19,16 +19,28 @@ const isMember = (value) => typeof value === 'string' ||
  * without an id is refused: there would be no way to say which rule was meant.
  *
  * **Sets inside sets,** so a parent can be switched as one and can show that
- * its children differ. **Mutable,** so a later plugin can add its rules, or
- * whole sets, to one that exists: see `RuleSetRegistry.extend` for doing that
- * before the set is there.
+ * its children differ. **Mutable,** so the package that made it can add to it
+ * later.
+ *
+ * **One of perhaps several declarations of its id.** Any package may declare
+ * a set under an id, and a `RuleSetRegistry` takes every declaration of an id
+ * as one set: their members together, and their options where they state
+ * them. So a plugin adds its rules to another package's set by declaring the
+ * set again with them (or with `RuleSetRegistry.extend`), without importing
+ * it and whichever loads first. An option that is not given is no opinion,
+ * and `stated()` says which were.
+ *
+ * **It can take another package's place** (civ-clone/web-renderer#954):
+ * `{ supersedes: [...] }` names rules, or sets, that do not run while this set
+ * is in force, without their package knowing. What it supersedes is fixed
+ * when it is made.
  *
  * A set only describes. `RuleSetRegistry` holds what has been chosen and
  * switches the rules.
  */
 class RuleSet {
     constructor(id, ...values) {
-        var _a, _b;
+        var _a, _b, _c;
         this._listeners = [];
         this._members = [];
         if (typeof id !== 'string' || id === '') {
@@ -46,17 +58,43 @@ class RuleSet {
             if (value === null ||
                 typeof value !== 'object' ||
                 Object.getPrototypeOf(value) !== Object.prototype ||
-                Object.keys(value).some((key) => !['enabled', 'exclusive'].includes(key))) {
+                Object.keys(value).some((key) => !['default', 'enabled', 'exclusive', 'supersedes'].includes(key))) {
                 throw new RuleSetError(`RuleSet '${id}': a member is a rule id, a Rule with an id or a ` +
-                    'RuleSet, and the options are `exclusive` and `enabled`.');
+                    'RuleSet, and the options are `exclusive`, `default`, `enabled` ' +
+                    'and `supersedes`.');
             }
             Object.assign(options, value);
         });
         this._exclusive = (_a = options.exclusive) !== null && _a !== void 0 ? _a : false;
         this._enabled = (_b = options.enabled) !== null && _b !== void 0 ? _b : true;
+        const supersedes = options.supersedes === undefined ? [] : options.supersedes;
+        if (!Array.isArray(supersedes) ||
+            supersedes.some((other) => typeof other !== 'string' || other === '')) {
+            throw new RuleSetError(`RuleSet '${id}': \`supersedes\` is a list of the ids of rules or ` +
+                'rule sets.');
+        }
+        // Taking its own place would mean it never ran while it was on: whatever was meant, it was not that.
+        if (supersedes.includes(id)) {
+            throw new RuleSetError(`RuleSet '${id}' cannot supersede itself.`);
+        }
+        this._supersedes = [...new Set(supersedes)];
         if (this._exclusive && options.enabled === false) {
             throw new RuleSetError(`RuleSet '${id}': a choice always has one member on, so it cannot ` +
                 'start switched off.');
+        }
+        // Not looked for among the members: another declaration of the set may bring it.
+        if (options.default !== undefined &&
+            (options.exclusive !== true ||
+                typeof options.default !== 'string' ||
+                options.default === '')) {
+            throw new RuleSetError(`RuleSet '${id}': \`default\` is the id of a member, and only a ` +
+                'choice (`exclusive: true`) has one.');
+        }
+        this._default = (_c = options.default) !== null && _c !== void 0 ? _c : null;
+        // What was said, and only that: a declaration that leaves an option out has no opinion on it.
+        this._stated = Object.fromEntries(Object.entries(options).filter(([, value]) => value !== undefined));
+        if (this._stated.supersedes !== undefined) {
+            this._stated.supersedes = this.supersedes();
         }
         this.add(...members);
     }
@@ -70,6 +108,18 @@ class RuleSet {
     /** Whether its rules start switched on. */
     enabledByDefault() {
         return this._enabled;
+    }
+    /** A choice's default member as stated, or `null` for its first. */
+    defaultMember() {
+        return this._default;
+    }
+    /** The options this declaration gave, and none it left out. */
+    stated() {
+        return { ...this._stated };
+    }
+    /** The ids of the rules and sets this one takes the place of while it is in force. */
+    supersedes() {
+        return [...this._supersedes];
     }
     members() {
         return [...this._members];

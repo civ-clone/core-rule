@@ -8,12 +8,24 @@ export type RuleSetEntry = RuleSetMember | Rule;
 
 export type RuleSetOptions = {
   /**
-   * A choice: exactly one member is on, the first until another is chosen.
+   * A choice: exactly one member is on, its default until another is chosen.
    * A member can be one rule or a whole set of them.
    */
   exclusive?: boolean;
+  /**
+   * A choice's default member, by id. Without one, the first member is the
+   * default: which, for a choice declared in more than one place, depends on
+   * the order they load in (see `RuleSetRegistry.validate`).
+   */
+  default?: string;
   /** `false` for a plain set whose rules start switched off. */
   enabled?: boolean;
+  /**
+   * What this set takes the place of: ids of rules, or of sets, meaning every
+   * rule beneath them. While the set is in force none of them runs. See
+   * `RuleSetRegistry`.
+   */
+  supersedes?: string[];
 };
 
 export class RuleSetError extends Error {}
@@ -34,19 +46,34 @@ const isMember = (value: unknown): value is RuleSetEntry =>
  * without an id is refused: there would be no way to say which rule was meant.
  *
  * **Sets inside sets,** so a parent can be switched as one and can show that
- * its children differ. **Mutable,** so a later plugin can add its rules, or
- * whole sets, to one that exists: see `RuleSetRegistry.extend` for doing that
- * before the set is there.
+ * its children differ. **Mutable,** so the package that made it can add to it
+ * later.
+ *
+ * **One of perhaps several declarations of its id.** Any package may declare
+ * a set under an id, and a `RuleSetRegistry` takes every declaration of an id
+ * as one set: their members together, and their options where they state
+ * them. So a plugin adds its rules to another package's set by declaring the
+ * set again with them (or with `RuleSetRegistry.extend`), without importing
+ * it and whichever loads first. An option that is not given is no opinion,
+ * and `stated()` says which were.
+ *
+ * **It can take another package's place** (civ-clone/web-renderer#954):
+ * `{ supersedes: [...] }` names rules, or sets, that do not run while this set
+ * is in force, without their package knowing. What it supersedes is fixed
+ * when it is made.
  *
  * A set only describes. `RuleSetRegistry` holds what has been chosen and
  * switches the rules.
  */
 export class RuleSet {
+  private _default: string | null;
   private _enabled: boolean;
   private _exclusive: boolean;
   private _id: string;
   private _listeners: (() => void)[] = [];
   private _members: RuleSetMember[] = [];
+  private _stated: RuleSetOptions;
+  private _supersedes: string[];
 
   constructor(id: string, ...values: (RuleSetOptions | RuleSetEntry)[]) {
     if (typeof id !== 'string' || id === '') {
@@ -72,12 +99,14 @@ export class RuleSet {
         typeof value !== 'object' ||
         Object.getPrototypeOf(value) !== Object.prototype ||
         Object.keys(value).some(
-          (key) => !['enabled', 'exclusive'].includes(key)
+          (key) =>
+            !['default', 'enabled', 'exclusive', 'supersedes'].includes(key)
         )
       ) {
         throw new RuleSetError(
           `RuleSet '${id}': a member is a rule id, a Rule with an id or a ` +
-            'RuleSet, and the options are `exclusive` and `enabled`.'
+            'RuleSet, and the options are `exclusive`, `default`, `enabled` ' +
+            'and `supersedes`.'
         );
       }
 
@@ -87,11 +116,55 @@ export class RuleSet {
     this._exclusive = options.exclusive ?? false;
     this._enabled = options.enabled ?? true;
 
+    const supersedes: unknown =
+      options.supersedes === undefined ? [] : options.supersedes;
+
+    if (
+      !Array.isArray(supersedes) ||
+      supersedes.some((other) => typeof other !== 'string' || other === '')
+    ) {
+      throw new RuleSetError(
+        `RuleSet '${id}': \`supersedes\` is a list of the ids of rules or ` +
+          'rule sets.'
+      );
+    }
+
+    // Taking its own place would mean it never ran while it was on: whatever was meant, it was not that.
+    if (supersedes.includes(id)) {
+      throw new RuleSetError(`RuleSet '${id}' cannot supersede itself.`);
+    }
+
+    this._supersedes = [...new Set(supersedes)];
+
     if (this._exclusive && options.enabled === false) {
       throw new RuleSetError(
         `RuleSet '${id}': a choice always has one member on, so it cannot ` +
           'start switched off.'
       );
+    }
+
+    // Not looked for among the members: another declaration of the set may bring it.
+    if (
+      options.default !== undefined &&
+      (options.exclusive !== true ||
+        typeof options.default !== 'string' ||
+        options.default === '')
+    ) {
+      throw new RuleSetError(
+        `RuleSet '${id}': \`default\` is the id of a member, and only a ` +
+          'choice (`exclusive: true`) has one.'
+      );
+    }
+
+    this._default = options.default ?? null;
+
+    // What was said, and only that: a declaration that leaves an option out has no opinion on it.
+    this._stated = Object.fromEntries(
+      Object.entries(options).filter(([, value]) => value !== undefined)
+    );
+
+    if (this._stated.supersedes !== undefined) {
+      this._stated.supersedes = this.supersedes();
     }
 
     this.add(...members);
@@ -109,6 +182,21 @@ export class RuleSet {
   /** Whether its rules start switched on. */
   enabledByDefault(): boolean {
     return this._enabled;
+  }
+
+  /** A choice's default member as stated, or `null` for its first. */
+  defaultMember(): string | null {
+    return this._default;
+  }
+
+  /** The options this declaration gave, and none it left out. */
+  stated(): RuleSetOptions {
+    return { ...this._stated };
+  }
+
+  /** The ids of the rules and sets this one takes the place of while it is in force. */
+  supersedes(): string[] {
+    return [...this._supersedes];
   }
 
   members(): RuleSetMember[] {

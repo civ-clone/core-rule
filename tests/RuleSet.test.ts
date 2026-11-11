@@ -340,11 +340,14 @@ describe('RuleSetRegistry', (): void => {
 
       sets.extend('later', 'b', new RuleSet('inner', 'c'));
 
-      expect((): void => sets.check()).to.throw(UnknownRuleSetError);
+      // `extend` declares the set, so it is there from now on.
+      expect(sets.get('later')!.memberIds()).to.eql(['b', 'inner']);
+      expect(sets.validate()).to.eql([]);
 
       sets.register(new RuleSet('later', 'a'));
 
-      expect(sets.get('later')!.memberIds()).to.eql(['a', 'b', 'inner']);
+      // In the order the declarations arrived.
+      expect(sets.get('later')!.memberIds()).to.eql(['b', 'inner', 'a']);
       expect(sets.get('inner')).to.be.instanceof(RuleSet);
       expect((): void => sets.check()).not.to.throw();
 
@@ -389,16 +392,25 @@ describe('RuleSetRegistry', (): void => {
       expect(ran()).to.eql(['c', 'd', 'e', 'f']);
     });
 
-    it('should refuse two sets under one id', (): void => {
-      const { sets } = setUp(),
+    it('should take two sets under one id as one set', (): void => {
+      const { sets, ran } = setUp(),
         set = new RuleSet('set', 'a');
 
       sets.register(set);
       sets.register(set);
 
-      expect((): void => sets.register(new RuleSet('set', 'b'))).to.throw(
-        DuplicateRuleSetIdError
-      );
+      expect(sets.declarations('set')).to.eql([set]);
+
+      sets.register(new RuleSet('set', 'b'));
+
+      expect(sets.declarations('set')).to.have.length(2);
+      expect(sets.get('set')!.memberIds()).to.eql(['a', 'b']);
+      // The package's own object is left as it made it.
+      expect(set.memberIds()).to.eql(['a']);
+
+      sets.set('set', false);
+
+      expect(ran()).to.eql(['c', 'd', 'e', 'f']);
     });
 
     it('should switch a rule back on when no set holds it any more', (): void => {
@@ -427,15 +439,19 @@ describe('RuleSetRegistry', (): void => {
       expect((): void => sets.check()).not.to.throw();
     });
 
-    it('should name a rule nothing registered', (): void => {
+    it('should name a rule nothing registered, and not stop a game for it', (): void => {
       const { sets } = setUp();
 
       sets.register(new RuleSet('set', 'a', 'typo'));
 
-      expect((): void => sets.check())
-        .to.throw(UnknownRuleError)
-        .with.property('message')
-        .that.matches(/'set' names 'typo'/);
+      expect(sets.validate()).to.have.length(1);
+      expect(sets.validate()[0]).to.include({
+        kind: 'unknown-member',
+        blocking: false,
+      });
+      expect(sets.validate()[0].ids).to.eql(['set', 'typo']);
+      expect(sets.validate()[0].message).to.match(/'set' names 'typo'/);
+      expect((): void => sets.check()).not.to.throw();
     });
 
     it('should name a set that is inside itself', (): void => {
@@ -910,48 +926,51 @@ describe('RuleSetRegistry and what it leaves alone', (): void => {
 });
 
 describe('RuleSetRegistry kept whole', (): void => {
-  it('should take in none of a registration it refuses', (): void => {
+  it('should take in the whole of a registration under ids already there', (): void => {
     const { sets, ran } = setUp();
 
     sets.register(new RuleSet('set', 'a'));
+    sets.register(
+      new RuleSet('extras', { enabled: false }, 'b'),
+      new RuleSet('set', 'c')
+    );
 
-    expect((): void =>
-      sets.register(
-        new RuleSet('extras', { enabled: false }, 'b'),
-        new RuleSet('set', 'c')
-      )
-    ).to.throw(DuplicateRuleSetIdError);
-    expect(sets.get('extras')).to.be.null;
-    expect(ran()).to.eql(['a', 'b', 'c', 'd', 'e', 'f']);
+    expect(sets.get('set')!.memberIds()).to.eql(['a', 'c']);
+    expect(ran()).to.eql(['a', 'c', 'd', 'e', 'f']);
 
     // And two in one registration, one inside the other.
-    expect((): void =>
-      sets.register(
-        new RuleSet('outer', new RuleSet('same', 'd')),
-        new RuleSet('same', 'e')
-      )
-    ).to.throw(DuplicateRuleSetIdError);
-    expect(sets.get('outer')).to.be.null;
+    sets.register(
+      new RuleSet('outer', new RuleSet('same', 'd')),
+      new RuleSet('same', 'e')
+    );
+    sets.set('outer', false);
+
+    expect(sets.get('same')!.memberIds()).to.eql(['d', 'e']);
+    expect(ran()).to.eql(['a', 'c', 'f']);
   });
 
-  it('should take in none of a registration whose waiting members it has to refuse', (): void => {
-    const { sets, ran } = setUp();
+  it('should take a set given to `extend` as another declaration of its id', (): void => {
+    const { sets, ran } = setUp(),
+      taken = new RuleSet('taken', 'f');
 
-    sets.register(new RuleSet('taken', 'f'));
+    sets.register(taken);
     sets.extend('later', new RuleSet('taken', 'c'));
+    sets.register(
+      new RuleSet('extras', { enabled: false }, 'b'),
+      new RuleSet('later', 'a')
+    );
 
-    expect((): void =>
-      sets.register(
-        new RuleSet('extras', { enabled: false }, 'b'),
-        new RuleSet('later', 'a')
-      )
-    ).to.throw(DuplicateRuleSetIdError);
-    expect(sets.get('extras')).to.be.null;
-    expect(sets.get('later')).to.be.null;
-    expect(ran()).to.eql(['a', 'b', 'c', 'd', 'e', 'f']);
+    expect(sets.get('taken')!.memberIds()).to.eql(['f', 'c']);
+    expect(taken.memberIds()).to.eql(['f']);
+    expect(sets.get('later')!.memberIds()).to.eql(['taken', 'a']);
+    expect(ran()).to.eql(['a', 'c', 'd', 'e', 'f']);
+
+    sets.set('later', false);
+
+    expect(ran()).to.eql(['d', 'e']);
   });
 
-  it('should tell every registry a set is in of a change, though one of them refuses it', (): void => {
+  it('should tell every registry a set is in of a change', (): void => {
     const first = setUp(),
       second = setUp(),
       shared = new RuleSet('shared', 'a');
@@ -959,14 +978,13 @@ describe('RuleSetRegistry kept whole', (): void => {
     first.sets.register(shared, new RuleSet('taken', 'f'));
     second.sets.register(shared);
 
-    expect(
-      (): RuleSet =>
-        shared.add(
-          new RuleSet('taken', 'c'),
-          new RuleSet('extras', { enabled: false }, 'b')
-        )
-    ).to.throw(DuplicateRuleSetIdError);
-    // Refused by the first, where the id is taken, and the set after it still taken in; taken in whole by the second.
+    shared.add(
+      new RuleSet('taken', 'c'),
+      new RuleSet('extras', { enabled: false }, 'b')
+    );
+
+    // Another declaration of `taken` in the first, where it is there already; the only one in the second.
+    expect(first.sets.get('taken')!.memberIds()).to.eql(['f', 'c']);
     expect(first.sets.get('extras')).to.be.instanceof(RuleSet);
     expect(first.ran()).to.eql(['a', 'c', 'd', 'e', 'f']);
     expect(second.sets.get('taken')).to.be.instanceof(RuleSet);
@@ -988,9 +1006,16 @@ describe('RuleSetRegistry kept whole', (): void => {
     expect(sets.get('inner')).to.be.null;
     expect(sets.get('deep')).to.be.null;
     expect(sets.get('shared')).to.equal(shared);
-    // `outer` is its package's, and still names `inner`: which `check()` now reports.
+    // `outer` is its package's, and still names `inner`: which `validate()` now reports, as an orphan only.
     expect(outer.memberIds()).to.eql(['a', 'inner']);
-    expect((): void => sets.check()).to.throw(UnknownRuleError);
+    expect(
+      sets
+        .validate()
+        .map(({ kind, ids, blocking }) => ({ kind, ids, blocking }))
+    ).to.eql([
+      { kind: 'unknown-member', ids: ['outer', 'inner'], blocking: false },
+    ]);
+    expect((): void => sets.check()).not.to.throw();
     // `b` and `c` are in no set now; `d` still is, and is still off.
     expect(ran()).to.eql(['b', 'c', 'e', 'f']);
 
@@ -1152,22 +1177,26 @@ describe('RuleSetRegistry kept whole', (): void => {
     expect((): void => sets.check()).to.throw(DuplicateRuleSetIdError);
   });
 
-  it('should adopt the rest when a set is given one under an id already taken', (): void => {
+  it('should adopt a set given under an id already there as another declaration of it', (): void => {
     const { sets, ran } = setUp(),
-      outer = new RuleSet('outer', 'a');
+      outer = new RuleSet('outer', 'a'),
+      taken = new RuleSet('taken', 'f');
 
-    sets.register(outer, new RuleSet('taken', 'f'));
+    sets.register(outer, taken);
+    outer.add(
+      new RuleSet('extras', { enabled: false }, 'b'),
+      new RuleSet('taken', 'c')
+    );
 
-    expect(
-      (): RuleSet =>
-        outer.add(
-          new RuleSet('extras', { enabled: false }, 'b'),
-          new RuleSet('taken', 'c')
-        )
-    ).to.throw(DuplicateRuleSetIdError);
-    // The set it could take is in, and switched; the id it could not take still means the set registered first.
     expect(sets.get('extras')).to.be.instanceof(RuleSet);
+    expect(sets.declarations('taken')).to.have.length(2);
+    expect(sets.get('taken')!.memberIds()).to.eql(['f', 'c']);
+    expect(taken.memberIds()).to.eql(['f']);
     expect(ran()).to.eql(['a', 'c', 'd', 'e', 'f']);
+
+    sets.set('taken', false);
+
+    expect(ran()).to.eql(['a', 'd', 'e']);
   });
 });
 
