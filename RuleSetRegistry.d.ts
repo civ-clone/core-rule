@@ -374,7 +374,8 @@ export declare class RuleSetRegistry implements IRuleSetRegistry {
    * sets are switched; except what the set itself holds through a live path
    * (see `_live`). So a set can take the place of the whole of another while
    * keeping one of its rules, by holding that rule too; and a rule it holds as
-   * an alternative not chosen is superseded with the rest.
+   * an alternative not chosen is superseded with the rest, when it is beneath
+   * something else the set names.
    */
   private _reach;
   /**
