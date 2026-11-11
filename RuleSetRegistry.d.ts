@@ -12,8 +12,8 @@ export type RuleSetState = 'on' | 'off' | 'mixed';
  * starting (`blocking`):
  *
  * - `conflict`: two sets in force, something of each of which runs,
- *   supersede the same registered rule, and neither supersedes the other. One
- *   has to be switched off.
+ *   supersede the same registered rule, neither supersedes the other, and
+ *   neither is beneath the other. One has to be switched off.
  * - `cycle`: a set inside itself, or superseding itself through others.
  * - `duplicate-id`: a set's id is also a rule's.
  * - `option-conflict`: two declarations of a set state an option differently.
@@ -152,7 +152,11 @@ export interface IRuleSetRegistry {
  * **Rules are switched as they arrive.** Packages load in name order, so a set
  * is often registered before the rules it names. The registry listens to the
  * `RuleRegistry`, so an alternative that is not the chosen one is off from the
- * moment it is registered, and no host has to remember to apply anything.
+ * moment it is registered, and no host has to remember to apply anything. A
+ * replacement rule that arrives puts its superseding set in force then; but
+ * the `RuleRegistry` says nothing when a rule is unregistered, so one that is
+ * taken out leaves its set in force until the sets are next applied (by any
+ * `set`, `choose`, `register` and the like).
  * `validate()` and `check()` are for the host once every package is in.
  *
  * **A set belongs to no package** (civ-clone/web-renderer#954). Any package

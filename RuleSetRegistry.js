@@ -222,7 +222,11 @@ class MergedRuleSet {
  * **Rules are switched as they arrive.** Packages load in name order, so a set
  * is often registered before the rules it names. The registry listens to the
  * `RuleRegistry`, so an alternative that is not the chosen one is off from the
- * moment it is registered, and no host has to remember to apply anything.
+ * moment it is registered, and no host has to remember to apply anything. A
+ * replacement rule that arrives puts its superseding set in force then; but
+ * the `RuleRegistry` says nothing when a rule is unregistered, so one that is
+ * taken out leaves its set in force until the sets are next applied (by any
+ * `set`, `choose`, `register` and the like).
  * `validate()` and `check()` are for the host once every package is in.
  *
  * **A set belongs to no package** (civ-clone/web-renderer#954). Any package
@@ -818,9 +822,12 @@ class RuleSetRegistry {
             const firstReach = this._reach(first), secondReach = this._reach(second), 
             // A rule nothing registered is an orphan, not a conflict: if it arrives, both its replacements are in force.
             shared = [...firstReach.rules].filter((rule) => secondReach.rules.has(rule) && this._rules.getById(rule) !== null);
+            // One beneath the other, at any depth, is one subtree and not two alternatives: there is nothing to choose.
             if (shared.length === 0 ||
                 firstReach.sets.has(second.id()) ||
-                secondReach.sets.has(first.id())) {
+                secondReach.sets.has(first.id()) ||
+                this._beneath(first.id()).sets.has(second.id()) ||
+                this._beneath(second.id()).sets.has(first.id())) {
                 return;
             }
             report({

@@ -922,3 +922,34 @@ describe('RuleSetRegistry declarations, at the edges', (): void => {
     expect(ran()).to.eql(['a', 'c', 'd', 'e', 'f']);
   });
 });
+
+describe('RuleSetRegistry conflicts within one subtree', (): void => {
+  it('should not report a set and one beneath it superseding one rule, but should two siblings', (): void => {
+    const nested = setUp(),
+      siblings = setUp();
+
+    nested.sets.register(
+      new RuleSet(
+        'parent',
+        { supersedes: ['a'] },
+        'b',
+        new RuleSet('middle', new RuleSet('child', { supersedes: ['a'] }, 'c'))
+      )
+    );
+
+    expect(nested.ran()).to.eql(['b', 'c', 'd', 'e', 'f']);
+    expect(nested.sets.validate()).to.eql([]);
+
+    siblings.sets.register(
+      new RuleSet(
+        'parent',
+        new RuleSet('first', { supersedes: ['a'] }, 'b'),
+        new RuleSet('second', { supersedes: ['a'] }, 'c')
+      )
+    );
+
+    expect(problems(siblings.sets)).to.eql([
+      { kind: 'conflict', ids: ['first', 'second'], blocking: true },
+    ]);
+  });
+});
