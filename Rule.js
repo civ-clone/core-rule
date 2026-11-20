@@ -6,6 +6,7 @@ const Criterion_1 = require("./Criterion");
 const Description_1 = require("./Description");
 const Effect_1 = require("./Effect");
 const Priorities_1 = require("./Priorities");
+const Priority_1 = require("./Priority");
 // How many times any rule has been switched on or off. `RuleRegistry` keeps its answer to "which rules of this type are
 //  enabled" and needs to know when to look again; a rule is switched through the rule itself as often as through a
 //  registry, so the rule is the only place that can count.
@@ -42,6 +43,7 @@ class Rule {
         this._priority = new Priorities_1.Normal();
         const criteria = [];
         values.forEach((value) => {
+            var _a, _b;
             if (typeof value === 'string') {
                 if (this._id !== null) {
                     throw new TypeError(`Rule: id already specified as '${this._id}', but '${value}' ` +
@@ -61,12 +63,20 @@ class Rule {
                 criteria.push(value);
                 return;
             }
-            // What it does, as data, for whatever explains the rules (civ-clone/web-renderer#1196).
-            if (value instanceof Description_1.default) {
+            // What it does, as data, for whatever explains the rules (civ-clone/web-renderer#1196). Known by its shape as
+            //  well, so one from another copy of this package is read too, rather than taken for the priority.
+            if (value instanceof Description_1.default ||
+                typeof value.effects === 'function') {
                 this._descriptions.push(...value.effects());
                 return;
             }
-            this._priority = value;
+            if (value instanceof Priority_1.default ||
+                typeof (value === null || value === void 0 ? void 0 : value.value) === 'function') {
+                this._priority = value;
+                return;
+            }
+            throw new TypeError(`Rule: '${(_b = (_a = value === null || value === void 0 ? void 0 : value.constructor) === null || _a === void 0 ? void 0 : _a.name) !== null && _b !== void 0 ? _b : typeof value}' is not an id, Priority, Criterion, Effect or Description ` +
+                '(is it from another copy of @civ-clone/core-rule?).');
         });
         if (criteria.length) {
             this._criteria = new And_1.default(...criteria);

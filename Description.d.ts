@@ -1,6 +1,7 @@
 /**
  * A value an effect description holds: a number, a word, a flag, a class (a building, a yield, a terrain…), which a
- *  reader names by its class name, or a list of them.
+ *  reader names by its class, so only named classes belong here, not arrow or anonymous functions; a list of them, or
+ *  a record of them (`{ Food: 1 }`).
  */
 export type DescribedValue =
   | string
@@ -8,7 +9,10 @@ export type DescribedValue =
   | boolean
   | null
   | Function
-  | DescribedValue[];
+  | DescribedValue[]
+  | {
+      [field: string]: DescribedValue | undefined;
+    };
 /**
  * What one effect of a rule does, as data a reader can put into words without knowing the rule: its `type`
  *  (`yield_percent`, `content`…), which says what the rest mean, and the fields that type has. `subject` is what the
@@ -20,7 +24,8 @@ export type DescribedValue =
  */
 export interface EffectDescription {
   type: string;
-  [field: string]: DescribedValue;
+  /** A field left `undefined` is dropped, so a typed description can have optional fields. */
+  [field: string]: DescribedValue | undefined;
 }
 /**
  * What a rule does, said as data (civ-clone/web-renderer#1196): one or more effect descriptions, given to the rule as

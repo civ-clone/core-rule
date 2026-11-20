@@ -71,4 +71,61 @@ describe('Description', () => {
     expect(() => new Description({ type: '' })).to.throw(TypeError);
     expect(() => new Description({} as any)).to.throw(TypeError);
   });
+
+  it('copies and freezes lists and records all the way down, and drops undefined fields', () => {
+    const list = [1, 2],
+      record = { Food: 1 },
+      rule = new Rule(
+        new Description({
+          type: 'content',
+          values: list,
+          yields: record,
+          of: undefined,
+        })
+      );
+
+    list.push(3);
+    record.Food = 2;
+
+    const [effect] = rule.descriptions();
+
+    expect(effect).to.deep.equal({
+      type: 'content',
+      values: [1, 2],
+      yields: { Food: 1 },
+    });
+    expect('of' in effect).to.false;
+    expect(() => (effect.values as number[]).push(4)).to.throw(TypeError);
+    expect(() => {
+      (effect.yields as { Food: number }).Food = 3;
+    }).to.throw(TypeError);
+  });
+
+  it('is read from a Description of another copy, by its shape, rather than taken for the priority', () => {
+    const foreign = {
+        effects: () => [{ type: 'content', value: 1 }],
+      },
+      rule = new Rule(
+        new High(),
+        new Effect(() => 1),
+        foreign as unknown as Description
+      );
+
+    expect(rule.descriptions()).to.deep.equal([{ type: 'content', value: 1 }]);
+    expect(rule.priority()).to.instanceOf(High);
+  });
+
+  it('refuses an item that is none of the things a rule takes', () => {
+    expect(() => new Rule({} as any)).to.throw(TypeError);
+  });
+
+  it('can be given with a priority and no effect', () => {
+    const rule = new Rule(
+      new High(),
+      new Description({ type: 'content', value: 1 })
+    );
+
+    expect(rule.priority()).to.instanceOf(High);
+    expect(rule.descriptions()).to.deep.equal([{ type: 'content', value: 1 }]);
+  });
 });

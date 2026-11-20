@@ -1,6 +1,19 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.Description = void 0;
+// A copy of `value` that can't be changed: lists and records copied and frozen all the way down, `undefined` fields
+//  dropped. Classes are kept as they are.
+const frozen = (value) => {
+    if (Array.isArray(value)) {
+        return Object.freeze(value.map((item) => frozen(item)));
+    }
+    if (value !== null && typeof value === 'object') {
+        return Object.freeze(Object.fromEntries(Object.entries(value)
+            .filter(([, field]) => field !== undefined)
+            .map(([key, field]) => [key, frozen(field)])));
+    }
+    return value;
+};
 /**
  * What a rule does, said as data (civ-clone/web-renderer#1196): one or more effect descriptions, given to the rule as
  *  another of its items, beside its criteria and effect:
@@ -27,7 +40,7 @@ class Description {
                 throw new TypeError('Description: each effect needs a `type`, a non-empty string.');
             }
         });
-        this._effects = Object.freeze(effects.map((effect) => Object.freeze({ ...effect })));
+        this._effects = Object.freeze(effects.map((effect) => frozen(effect)));
     }
     /** The effects described, in the order they were given. */
     effects() {

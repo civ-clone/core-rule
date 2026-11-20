@@ -93,14 +93,34 @@ export class Rule<C extends any[] = any[], R = any> implements IRule<C, R> {
           return;
         }
 
-        // What it does, as data, for whatever explains the rules (civ-clone/web-renderer#1196).
-        if (value instanceof Description) {
-          this._descriptions.push(...value.effects());
+        // What it does, as data, for whatever explains the rules (civ-clone/web-renderer#1196). Known by its shape as
+        //  well, so one from another copy of this package is read too, rather than taken for the priority.
+        if (
+          value instanceof Description ||
+          typeof (value as unknown as Description).effects === 'function'
+        ) {
+          this._descriptions.push(
+            ...(value as unknown as Description).effects()
+          );
 
           return;
         }
 
-        this._priority = value;
+        if (
+          value instanceof Priority ||
+          typeof (value as unknown as Priority)?.value === 'function'
+        ) {
+          this._priority = value as unknown as Priority;
+
+          return;
+        }
+
+        throw new TypeError(
+          `Rule: '${
+            (value as object)?.constructor?.name ?? typeof value
+          }' is not an id, Priority, Criterion, Effect or Description ` +
+            '(is it from another copy of @civ-clone/core-rule?).'
+        );
       }
     );
 

@@ -1,6 +1,7 @@
 /**
  * A value an effect description holds: a number, a word, a flag, a class (a building, a yield, a terrain…), which a
- *  reader names by its class name, or a list of them.
+ *  reader names by its class, so only named classes belong here, not arrow or anonymous functions; a list of them, or
+ *  a record of them (`{ Food: 1 }`).
  */
 export type DescribedValue =
   | string
@@ -8,7 +9,8 @@ export type DescribedValue =
   | boolean
   | null
   | Function
-  | DescribedValue[];
+  | DescribedValue[]
+  | { [field: string]: DescribedValue | undefined };
 
 /**
  * What one effect of a rule does, as data a reader can put into words without knowing the rule: its `type`
@@ -21,8 +23,29 @@ export type DescribedValue =
  */
 export interface EffectDescription {
   type: string;
-  [field: string]: DescribedValue;
+  /** A field left `undefined` is dropped, so a typed description can have optional fields. */
+  [field: string]: DescribedValue | undefined;
 }
+
+// A copy of `value` that can't be changed: lists and records copied and frozen all the way down, `undefined` fields
+//  dropped. Classes are kept as they are.
+const frozen = <T extends DescribedValue | EffectDescription>(value: T): T => {
+  if (Array.isArray(value)) {
+    return Object.freeze(value.map((item) => frozen(item))) as unknown as T;
+  }
+
+  if (value !== null && typeof value === 'object') {
+    return Object.freeze(
+      Object.fromEntries(
+        Object.entries(value)
+          .filter(([, field]) => field !== undefined)
+          .map(([key, field]) => [key, frozen(field as DescribedValue)])
+      )
+    ) as T;
+  }
+
+  return value;
+};
 
 /**
  * What a rule does, said as data (civ-clone/web-renderer#1196): one or more effect descriptions, given to the rule as
@@ -59,8 +82,7 @@ export class Description {
 
     this._effects = Object.freeze(
       effects.map(
-        (effect: EffectDescription): EffectDescription =>
-          Object.freeze({ ...effect })
+        (effect: EffectDescription): EffectDescription => frozen(effect)
       )
     );
   }
