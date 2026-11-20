@@ -25,7 +25,9 @@ export const switchCount = (): number => switches;
 
 export class Rule<C extends any[] = any[], R = any> implements IRule<C, R> {
   private _criteria: Criteria<C> | undefined;
-  private _descriptions: EffectDescription[] = [];
+  // Only a rule that describes itself has the field: a rule is reachable from saved state (a unit's `_busy`), and
+  //  an empty list on every one would change what is saved.
+  private _descriptions?: EffectDescription[];
   private _enabled: boolean = true;
   private _effect: Effect<C, R> | undefined;
   private _id: string | null = null;
@@ -99,7 +101,7 @@ export class Rule<C extends any[] = any[], R = any> implements IRule<C, R> {
           value instanceof Description ||
           typeof (value as unknown as Description)?.effects === 'function'
         ) {
-          this._descriptions.push(
+          (this._descriptions ??= []).push(
             ...(value as unknown as Description).effects()
           );
 
@@ -135,7 +137,7 @@ export class Rule<C extends any[] = any[], R = any> implements IRule<C, R> {
    *  says nothing about itself. Read whether or not the rule is enabled: whatever explains the rules asks `enabled()`.
    */
   descriptions(): EffectDescription[] {
-    return [...this._descriptions];
+    return [...(this._descriptions ?? [])];
   }
 
   disable(): void {

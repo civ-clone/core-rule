@@ -154,4 +154,10 @@ describe('Description', () => {
     expect(effect.subject).to.equal(Library);
     expect(() => new Rule(undefined as any)).to.throw(TypeError, /Rule:/);
   });
+
+  it('adds no field to a rule that describes nothing, so what is saved of it is unchanged', () => {
+    expect(Object.keys(new Rule(new Effect(() => 1)))).to.not.include(
+      '_descriptions'
+    );
+  });
 });

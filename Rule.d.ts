@@ -16,7 +16,7 @@ export declare class Rule<C extends any[] = any[], R = any>
   implements IRule<C, R>
 {
   private _criteria;
-  private _descriptions;
+  private _descriptions?;
   private _enabled;
   private _effect;
   private _id;
