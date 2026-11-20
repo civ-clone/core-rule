@@ -3,6 +3,24 @@
 This component contains the framework for `Rule`s. These are comprised of `Criterion`s and `Effect`s with optional `Priority`s.
 
 
+## Descriptions
+
+A rule can say what it does, as data, so that whatever explains the rules to a player (a Civilopedia) can put it into words without knowing the rule. Give it a `Description` beside its criteria and effect, built from the same values as the effect so the two can't disagree:
+
+```ts
+import Description from '@civ-clone/core-rule/Description';
+
+const libraryBonus = 0.5;
+
+new YieldModifier(
+  new Criterion((city: City, yieldValue: Yield) => yieldValue instanceof Research && hasLibrary(city)),
+  new Effect((city: City, yieldValue: Yield) => yieldValue.add(yieldValue.value() * libraryBonus)),
+  new Description({ type: 'yield_percent', subject: Library, yield: Research, value: libraryBonus, of: 'base' })
+);
+```
+
+`rule.descriptions()` gives every effect described, enabled or not. Each is `{ type, ...fields }`: the `type` says what its fields mean, and a field holds a number, a word, a flag, a class (named by its class name) or a list of them. Nothing reads them while the rules run.
+
 ## Rule sets
 
 A `RuleSet` is a named group of rules, held by id, that a game switches together. A `RuleSetRegistry` holds a game's sets and what has been chosen in them, and switches the rules in its `RuleRegistry` to match.

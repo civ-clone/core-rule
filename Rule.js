@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.Rule = exports.switchCount = void 0;
 const And_1 = require("./Criteria/And");
 const Criterion_1 = require("./Criterion");
+const Description_1 = require("./Description");
 const Effect_1 = require("./Effect");
 const Priorities_1 = require("./Priorities");
 // How many times any rule has been switched on or off. `RuleRegistry` keeps its answer to "which rules of this type are
@@ -35,6 +36,7 @@ class Rule {
      * look for what it names.
      */
     constructor(...values) {
+        this._descriptions = [];
         this._enabled = true;
         this._id = null;
         this._priority = new Priorities_1.Normal();
@@ -59,11 +61,23 @@ class Rule {
                 criteria.push(value);
                 return;
             }
+            // What it does, as data, for whatever explains the rules (civ-clone/web-renderer#1196).
+            if (value instanceof Description_1.default) {
+                this._descriptions.push(...value.effects());
+                return;
+            }
             this._priority = value;
         });
         if (criteria.length) {
             this._criteria = new And_1.default(...criteria);
         }
+    }
+    /**
+     * What the rule does, as data (`Description`): every effect described, in the order given, or none for a rule that
+     *  says nothing about itself. Read whether or not the rule is enabled: whatever explains the rules asks `enabled()`.
+     */
+    descriptions() {
+        return [...this._descriptions];
     }
     disable() {
         if (this._enabled) {

@@ -1,4 +1,5 @@
 import Criterion from './Criterion';
+import Description, { EffectDescription } from './Description';
 import Effect from './Effect';
 import Priority from './Priority';
 export interface IRule<C extends any[] = any[], R = any> {
@@ -15,6 +16,7 @@ export declare class Rule<C extends any[] = any[], R = any>
   implements IRule<C, R>
 {
   private _criteria;
+  private _descriptions;
   private _enabled;
   private _effect;
   private _id;
@@ -41,7 +43,14 @@ export declare class Rule<C extends any[] = any[], R = any>
    * The convention is `package:path/to/rule`, so an identifier says where to
    * look for what it names.
    */
-  constructor(...values: (string | Priority | Criterion<C> | Effect<C, R>)[]);
+  constructor(
+    ...values: (string | Priority | Criterion<C> | Effect<C, R> | Description)[]
+  );
+  /**
+   * What the rule does, as data (`Description`): every effect described, in the order given, or none for a rule that
+   *  says nothing about itself. Read whether or not the rule is enabled: whatever explains the rules asks `enabled()`.
+   */
+  descriptions(): EffectDescription[];
   disable(): void;
   enable(): void;
   /** The identifier this rule was constructed with, if any. */
