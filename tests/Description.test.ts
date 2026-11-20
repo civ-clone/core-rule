@@ -128,4 +128,30 @@ describe('Description', () => {
     expect(rule.priority()).to.instanceOf(High);
     expect(rule.descriptions()).to.deep.equal([{ type: 'content', value: 1 }]);
   });
+
+  it('takes a shape declared as an interface, and refuses an instance as a field', () => {
+    interface Content {
+      type: 'content';
+      value: number;
+    }
+
+    const content: Content = { type: 'content', value: 1 };
+
+    expect(new Description(content).effects()).to.deep.equal([content]);
+    expect(
+      () => new Description({ type: 'content', value: new Map() as any })
+    ).to.throw(TypeError);
+  });
+
+  it('keeps classes as they are, and refuses nothing at all as an item', () => {
+    class Library {}
+
+    const [effect] = new Description({
+      type: 'content',
+      subject: Library,
+    }).effects();
+
+    expect(effect.subject).to.equal(Library);
+    expect(() => new Rule(undefined as any)).to.throw(TypeError, /Rule:/);
+  });
 });

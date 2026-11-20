@@ -66,10 +66,11 @@ class Rule {
             // What it does, as data, for whatever explains the rules (civ-clone/web-renderer#1196). Known by its shape as
             //  well, so one from another copy of this package is read too, rather than taken for the priority.
             if (value instanceof Description_1.default ||
-                typeof value.effects === 'function') {
+                typeof (value === null || value === void 0 ? void 0 : value.effects) === 'function') {
                 this._descriptions.push(...value.effects());
                 return;
             }
+            // Anything with a `value()` is taken for a priority, as one from another copy of this package would be.
             if (value instanceof Priority_1.default ||
                 typeof (value === null || value === void 0 ? void 0 : value.value) === 'function') {
                 this._priority = value;

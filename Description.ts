@@ -27,6 +27,11 @@ export interface EffectDescription {
   [field: string]: DescribedValue | undefined;
 }
 
+/** A description declared as an `interface`: anything with a `type`. */
+export interface DescriptionShape {
+  type: string;
+}
+
 // A copy of `value` that can't be changed: lists and records copied and frozen all the way down, `undefined` fields
 //  dropped. Classes are kept as they are.
 const frozen = <T extends DescribedValue | EffectDescription>(value: T): T => {
@@ -35,6 +40,16 @@ const frozen = <T extends DescribedValue | EffectDescription>(value: T): T => {
   }
 
   if (value !== null && typeof value === 'object') {
+    const prototype = Object.getPrototypeOf(value);
+
+    // An instance would lose its class here: name its class instead.
+    if (prototype !== Object.prototype && prototype !== null) {
+      throw new TypeError(
+        `Description: a field holds a '${prototype?.constructor?.name}', but only numbers, words, flags, classes, ` +
+          'lists and plain records can be described.'
+      );
+    }
+
     return Object.freeze(
       Object.fromEntries(
         Object.entries(value)
@@ -66,8 +81,12 @@ const frozen = <T extends DescribedValue | EffectDescription>(value: T): T => {
 export class Description {
   private _effects: readonly EffectDescription[];
 
-  constructor(...effects: EffectDescription[]) {
-    effects.forEach((effect: EffectDescription): void => {
+  /**
+   * Each effect is an `EffectDescription`, or any shape with a `type` (an `interface` has no index signature, so it
+   *  wouldn't be one), whose fields are checked as they are copied.
+   */
+  constructor(...effects: (EffectDescription | DescriptionShape)[]) {
+    effects.forEach((effect: EffectDescription | DescriptionShape): void => {
       if (
         effect === null ||
         typeof effect !== 'object' ||
@@ -82,7 +101,8 @@ export class Description {
 
     this._effects = Object.freeze(
       effects.map(
-        (effect: EffectDescription): EffectDescription => frozen(effect)
+        (effect: EffectDescription | DescriptionShape): EffectDescription =>
+          frozen(effect as EffectDescription)
       )
     );
   }

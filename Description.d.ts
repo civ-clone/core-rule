@@ -27,6 +27,10 @@ export interface EffectDescription {
   /** A field left `undefined` is dropped, so a typed description can have optional fields. */
   [field: string]: DescribedValue | undefined;
 }
+/** A description declared as an `interface`: anything with a `type`. */
+export interface DescriptionShape {
+  type: string;
+}
 /**
  * What a rule does, said as data (civ-clone/web-renderer#1196): one or more effect descriptions, given to the rule as
  *  another of its items, beside its criteria and effect:
@@ -45,7 +49,11 @@ export interface EffectDescription {
  */
 export declare class Description {
   private _effects;
-  constructor(...effects: EffectDescription[]);
+  /**
+   * Each effect is an `EffectDescription`, or any shape with a `type` (an `interface` has no index signature, so it
+   *  wouldn't be one), whose fields are checked as they are copied.
+   */
+  constructor(...effects: (EffectDescription | DescriptionShape)[]);
   /** The effects described, in the order they were given. */
   effects(): EffectDescription[];
 }

@@ -97,7 +97,7 @@ export class Rule<C extends any[] = any[], R = any> implements IRule<C, R> {
         //  well, so one from another copy of this package is read too, rather than taken for the priority.
         if (
           value instanceof Description ||
-          typeof (value as unknown as Description).effects === 'function'
+          typeof (value as unknown as Description)?.effects === 'function'
         ) {
           this._descriptions.push(
             ...(value as unknown as Description).effects()
@@ -106,6 +106,7 @@ export class Rule<C extends any[] = any[], R = any> implements IRule<C, R> {
           return;
         }
 
+        // Anything with a `value()` is taken for a priority, as one from another copy of this package would be.
         if (
           value instanceof Priority ||
           typeof (value as unknown as Priority)?.value === 'function'
