@@ -1,6 +1,7 @@
 import And from './Criteria/And';
 import Criteria from './Criteria';
 import Criterion from './Criterion';
+import Description, { EffectDescription } from './Description';
 import Effect from './Effect';
 import { Normal } from './Priorities';
 import Priority from './Priority';
@@ -24,6 +25,7 @@ export const switchCount = (): number => switches;
 
 export class Rule<C extends any[] = any[], R = any> implements IRule<C, R> {
   private _criteria: Criteria<C> | undefined;
+  private _descriptions: EffectDescription[] = [];
   private _enabled: boolean = true;
   private _effect: Effect<C, R> | undefined;
   private _id: string | null = null;
@@ -51,11 +53,15 @@ export class Rule<C extends any[] = any[], R = any> implements IRule<C, R> {
    * The convention is `package:path/to/rule`, so an identifier says where to
    * look for what it names.
    */
-  constructor(...values: (string | Priority | Criterion<C> | Effect<C, R>)[]) {
+  constructor(
+    ...values: (string | Priority | Criterion<C> | Effect<C, R> | Description)[]
+  ) {
     const criteria: Criterion<C>[] = [];
 
     values.forEach(
-      (value: string | Priority | Criterion<C> | Effect<C, R>): void => {
+      (
+        value: string | Priority | Criterion<C> | Effect<C, R> | Description
+      ): void => {
         if (typeof value === 'string') {
           if (this._id !== null) {
             throw new TypeError(
@@ -87,13 +93,49 @@ export class Rule<C extends any[] = any[], R = any> implements IRule<C, R> {
           return;
         }
 
-        this._priority = value;
+        // What it does, as data, for whatever explains the rules (civ-clone/web-renderer#1196). Known by its shape as
+        //  well, so one from another copy of this package is read too, rather than taken for the priority.
+        if (
+          value instanceof Description ||
+          typeof (value as unknown as Description)?.effects === 'function'
+        ) {
+          this._descriptions.push(
+            ...(value as unknown as Description).effects()
+          );
+
+          return;
+        }
+
+        // Anything with a `value()` is taken for a priority, as one from another copy of this package would be.
+        if (
+          value instanceof Priority ||
+          typeof (value as unknown as Priority)?.value === 'function'
+        ) {
+          this._priority = value as unknown as Priority;
+
+          return;
+        }
+
+        throw new TypeError(
+          `Rule: '${
+            (value as object)?.constructor?.name ?? typeof value
+          }' is not an id, Priority, Criterion, Effect or Description ` +
+            '(is it from another copy of @civ-clone/core-rule?).'
+        );
       }
     );
 
     if (criteria.length) {
       this._criteria = new And(...criteria);
     }
+  }
+
+  /**
+   * What the rule does, as data (`Description`): every effect described, in the order given, or none for a rule that
+   *  says nothing about itself. Read whether or not the rule is enabled: whatever explains the rules asks `enabled()`.
+   */
+  descriptions(): EffectDescription[] {
+    return [...this._descriptions];
   }
 
   disable(): void {
