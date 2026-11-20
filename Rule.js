@@ -37,13 +37,12 @@ class Rule {
      * look for what it names.
      */
     constructor(...values) {
-        this._descriptions = [];
         this._enabled = true;
         this._id = null;
         this._priority = new Priorities_1.Normal();
         const criteria = [];
         values.forEach((value) => {
-            var _a, _b;
+            var _a, _b, _c;
             if (typeof value === 'string') {
                 if (this._id !== null) {
                     throw new TypeError(`Rule: id already specified as '${this._id}', but '${value}' ` +
@@ -67,7 +66,7 @@ class Rule {
             //  well, so one from another copy of this package is read too, rather than taken for the priority.
             if (value instanceof Description_1.default ||
                 typeof (value === null || value === void 0 ? void 0 : value.effects) === 'function') {
-                this._descriptions.push(...value.effects());
+                ((_a = this._descriptions) !== null && _a !== void 0 ? _a : (this._descriptions = [])).push(...value.effects());
                 return;
             }
             // Anything with a `value()` is taken for a priority, as one from another copy of this package would be.
@@ -76,7 +75,7 @@ class Rule {
                 this._priority = value;
                 return;
             }
-            throw new TypeError(`Rule: '${(_b = (_a = value === null || value === void 0 ? void 0 : value.constructor) === null || _a === void 0 ? void 0 : _a.name) !== null && _b !== void 0 ? _b : typeof value}' is not an id, Priority, Criterion, Effect or Description ` +
+            throw new TypeError(`Rule: '${(_c = (_b = value === null || value === void 0 ? void 0 : value.constructor) === null || _b === void 0 ? void 0 : _b.name) !== null && _c !== void 0 ? _c : typeof value}' is not an id, Priority, Criterion, Effect or Description ` +
                 '(is it from another copy of @civ-clone/core-rule?).');
         });
         if (criteria.length) {
@@ -88,7 +87,8 @@ class Rule {
      *  says nothing about itself. Read whether or not the rule is enabled: whatever explains the rules asks `enabled()`.
      */
     descriptions() {
-        return [...this._descriptions];
+        var _a;
+        return [...((_a = this._descriptions) !== null && _a !== void 0 ? _a : [])];
     }
     disable() {
         if (this._enabled) {
